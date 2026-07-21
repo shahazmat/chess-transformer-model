@@ -1,0 +1,9 @@
+{
+ "games": 69457,
+ "plies": 4829241,
+ "tokens": 6368894,
+ "vocab_size": 5666,
+ "san_parse_errors": 0,
+ "glyph_vs_computed_disagreement_plies": 4226,
+ "elapsed_sec": 26.4
+}

@@ -4,6 +4,17 @@ Goal: a token stream in this repo's vocabulary (see [README](README.md)), with
 nerf tokens derived from real engine evaluations, packed into nanoGPT's
 `train.bin` / `val.bin` format.
 
+> **Status (2026-07-21): Stages A–D are implemented in
+> [`chess-tokeniser/`](chess-tokeniser/README.md).** `build_dataset.py` covers
+> filtering + labelling + tokenising (Stages A–C) and `pack.py` covers packing
+> (Stage D). It reads the Hugging Face `Lichess/standard-chess-games` parquet via
+> DuckDB rather than streaming raw `.pgn.zst` — same games, less plumbing — so
+> the Stage A skeleton below is historical. **Vocab v2 is done**: `<bos>`,
+> `<eos>`, and 13 `<elo-*>` tokens are appended in
+> [`js/vocab-data.js`](js/vocab-data.js) (ids 5252–5266, total 5,267). What
+> remains is *running* the training (Stages/milestones 4–6), not building the
+> data pipeline.
+
 ## 1. Source: the Lichess open database
 
 - **What:** https://database.lichess.org — monthly `.pgn.zst` dumps of every
@@ -152,15 +163,15 @@ readable token streams).
 
 ## 6. Milestones
 
-| # | deliverable | check |
-|---|---|---|
-| 0 | one month downloaded; count evaluated games | ~6% of games |
-| 1 | `filter_lichess.py` → JSONL | SANs replay legally via python-chess |
-| 2 | labeller | blunder-rate vs Elo plot is monotone |
-| 3 | vocab v2 (structural tokens) + Python tokenizer | round-trips vs `vocab-data.js` ids |
-| 4 | `prepare.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard |
-| 5 | 8×512 run on 15–20M games | pre-mask legal mass ≫ 99%; nerf rate tracks Elo |
-| 6 | export checkpoint behind `predict(ctx)` (ONNX / transformers.js or a local server) and plug into `window.chessGpt.setModel` | play it in the harness |
+| # | deliverable | check | status |
+|---|---|---|---|
+| 0 | evaluated games sourced (HF parquet, DuckDB `contains('[%eval')`) | ~6% of games | ✅ |
+| 1 | `build_dataset.py` → tokenised parquet | 0 SAN parse errors on real games | ✅ |
+| 2 | labeller (`tokeniser.classify`, Lichess win%-drop thresholds) | blunder-rate vs Elo plot is monotone | 🟡 code done; sanity plot not yet scripted |
+| 3 | vocab v2 (`<bos>`/`<eos>`/`<elo-*>`) + Python tokenizer (`vocab.py`) | round-trips vs `vocab-data.js` ids | ✅ `test_pack.py` (round-trip + JS↔Python parity) |
+| 4 | `pack.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard | 🟡 bins produced + verified; smoke run pending |
+| 5 | 8×512 run on 15–20M games | pre-mask legal mass ≫ 99%; nerf rate tracks Elo | ⬜ |
+| 6 | export checkpoint behind `predict(ctx)` (ONNX / transformers.js or a local server) and plug into `window.chessGpt.setModel` | play it in the harness | ⬜ |
 
 Known bias to accept for now: analysis-requested games skew toward engaged
 players and decisive games. The scale-up path is labelling unevaluated games

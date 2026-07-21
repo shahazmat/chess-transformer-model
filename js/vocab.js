@@ -36,6 +36,27 @@ export { TOKENS };
 export const MODIFIER_TOKENS = ['+', '#', 'x', '=Q', '=R', '=B', '=N'];
 export const NERF_TOKENS = ['<inaccuracy>', '<mistake>', '<blunder>'];
 
+// vocab v2 — structural framing tokens used by the training pipeline, appended
+// after the nerf tokens (see tools/build-vocab.mjs). They never appear as legal
+// moves, so the engine's legality mask zeroes them during play; they exist so
+// the model can be trained/prompted with game boundaries and Elo conditioning.
+// <bos>/<eos> wrap each game; <elo-*> buckets encode both players' strength.
+export const BOS_TOKEN = '<bos>';
+export const EOS_TOKEN = '<eos>';
+export const ELO_TOKENS = [
+  '<elo-u800>', '<elo-800>', '<elo-1000>', '<elo-1200>', '<elo-1400>', '<elo-1600>',
+  '<elo-1800>', '<elo-2000>', '<elo-2200>', '<elo-2400>', '<elo-2600>', '<elo-2800>', '<elo-3000p>',
+];
+export const STRUCTURAL_TOKENS = [BOS_TOKEN, EOS_TOKEN, ...ELO_TOKENS];
+
+// Map a numeric Elo to its bucket token. Must match elo_bucket_token() in
+// chess-tokeniser/vocab.py so training data and the harness agree.
+export function eloBucketToken(elo) {
+  if (!Number.isFinite(elo) || elo < 800) return '<elo-u800>';
+  if (elo >= 3000) return '<elo-3000p>';
+  return `<elo-${Math.floor(elo / 200) * 200}>`;
+}
+
 // nerf token -> quality label passed back into model.predict({quality})
 export const QUALITY_BY_TOKEN = {
   '<inaccuracy>': 'inaccuracy',
@@ -54,11 +75,12 @@ export const CORE_TOKENS = Object.freeze(TOKENS.slice(0, CORE_COUNT));
 export const TOKEN_INDEX = new Map(TOKENS.map((t, i) => [t, i]));
 export const VOCAB_SIZE = TOKENS.length;
 
-// The dictionary must end with exactly the modifier + nerf tokens this module
-// (and the engine) reason about. Fail loudly if the data file has drifted.
+// The dictionary must end with exactly the modifier + nerf + structural tokens
+// this module (and the engine) reason about. Fail loudly if the data file has
+// drifted.
 {
   const tail = TOKENS.slice(CORE_COUNT);
-  const expected = [...MODIFIER_TOKENS, ...NERF_TOKENS];
+  const expected = [...MODIFIER_TOKENS, ...NERF_TOKENS, ...STRUCTURAL_TOKENS];
   if (tail.length !== expected.length || tail.some((t, i) => t !== expected[i])) {
     throw new Error('vocab-data.js is out of sync with vocab.js — regenerate it: node tools/build-vocab.mjs');
   }
