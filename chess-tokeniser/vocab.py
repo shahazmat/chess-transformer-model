@@ -35,6 +35,7 @@ GLYPH_TO_NERF = {"??": "<blunder>", "?": "<mistake>", "?!": "<inaccuracy>"}
 
 BOS = "<bos>"
 EOS = "<eos>"
+ELO_ANY = "<elo-any>"   # "strength unspecified" sentinel (see encode_game)
 
 
 def translate(token: str) -> str:
@@ -80,7 +81,7 @@ class Vocab:
         self.itos = {i: t for i, t in enumerate(tokens)}
         self.size = len(tokens)
         # structural ids used during framing (fail loudly if vocab v2 is missing)
-        missing = [t for t in (BOS, EOS, "<elo-u800>", "<elo-3000p>") if t not in self.stoi]
+        missing = [t for t in (BOS, EOS, ELO_ANY, "<elo-u800>", "<elo-3000p>") if t not in self.stoi]
         if missing:
             raise ValueError(
                 f"vocab-data.js is missing structural tokens {missing}; "
@@ -88,20 +89,32 @@ class Vocab:
             )
         self.bos_id = self.stoi[BOS]
         self.eos_id = self.stoi[EOS]
+        self.elo_any_id = self.stoi[ELO_ANY]
 
     # -- framing -------------------------------------------------------------
 
-    def encode_game(self, tokens_field: str, white_elo, black_elo):
+    def _elo_id(self, elo, elo_dropout, rng):
+        """Bucket id for `elo`, or the <elo-any> sentinel with prob elo_dropout."""
+        if elo_dropout and rng is not None and rng.random() < elo_dropout:
+            return self.elo_any_id
+        return self.stoi[elo_bucket_token(elo)]
+
+    def encode_game(self, tokens_field: str, white_elo, black_elo, elo_dropout: float = 0.0, rng=None):
         """Frame one game as ids: <bos> <elo-W> <elo-B> <moves...> <eos>.
 
         `tokens_field` is the space-joined bracketed stream from build_dataset.
+        With `elo_dropout` > 0 and a `random.Random` `rng`, each Elo slot is
+        INDEPENDENTLY replaced by <elo-any> with that probability — so the model
+        also sees unconditioned / half-conditioned games and inference can omit
+        or neutralise Elo. rng makes the choice reproducible; pass a seeded one.
+
         Returns (ids, unknown_tokens). If any move token is outside the frozen
         dictionary, ids is None and unknown_tokens names the offenders (the
         caller should drop the game). On real Lichess data this never fires —
         the dictionary is a superset of legal SAN — but synthetic corpora with
         geometrically-loose SANs can trip it, which is the point of the check.
         """
-        ids = [self.bos_id, self.stoi[elo_bucket_token(white_elo)], self.stoi[elo_bucket_token(black_elo)]]
+        ids = [self.bos_id, self._elo_id(white_elo, elo_dropout, rng), self._elo_id(black_elo, elo_dropout, rng)]
         unknown: set[str] = set()
         for tok in tokens_field.split():
             sid = self.stoi.get(translate(tok))

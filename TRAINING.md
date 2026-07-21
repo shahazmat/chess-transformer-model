@@ -10,8 +10,10 @@ nerf tokens derived from real engine evaluations, packed into nanoGPT's
 > (Stage D). It reads the Hugging Face `Lichess/standard-chess-games` parquet via
 > DuckDB rather than streaming raw `.pgn.zst` — same games, less plumbing — so
 > the Stage A skeleton below is historical. **Vocab v2 is done**: `<bos>`,
-> `<eos>`, and 13 `<elo-*>` tokens are appended in
-> [`js/vocab-data.js`](js/vocab-data.js) (ids 5252–5266, total 5,267). What
+> `<eos>`, 13 `<elo-*>` buckets, and an `<elo-any>` "unspecified" sentinel are
+> appended in [`js/vocab-data.js`](js/vocab-data.js) (ids 5252–5267, total
+> 5,268). `pack.py --elo-dropout` swaps buckets for `<elo-any>` on a fraction of
+> games so the model also learns unconditioned play (inference can omit Elo). What
 > remains is *running* the training (Stages/milestones 4–6), not building the
 > data pipeline.
 
@@ -123,6 +125,11 @@ harness feeds back as `historyTokens`):
 <bos> <elo-1800> <elo-1700>   ['e4'] ['x','Nf3'] ['<blunder>','x','Qf6'] ... <eos>
        (white)    (black)
 ```
+
+Either Elo slot can instead be `<elo-any>` (the "strength unspecified" sentinel):
+`pack.py --elo-dropout` swaps buckets for it on a fraction of games, per side and
+independently, so the model learns conditioned, half-conditioned, and fully
+unconditioned play — at inference you feed `<elo-any>` to omit/neutralise Elo.
 
 - Move tokens: port `sanToTokens()` from [js/vocab.js](js/vocab.js) to Python
   (it is ~20 lines: two regexes). **Token ids must come from

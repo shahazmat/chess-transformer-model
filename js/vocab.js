@@ -47,7 +47,11 @@ export const ELO_TOKENS = [
   '<elo-u800>', '<elo-800>', '<elo-1000>', '<elo-1200>', '<elo-1400>', '<elo-1600>',
   '<elo-1800>', '<elo-2000>', '<elo-2200>', '<elo-2400>', '<elo-2600>', '<elo-2800>', '<elo-3000p>',
 ];
-export const STRUCTURAL_TOKENS = [BOS_TOKEN, EOS_TOKEN, ...ELO_TOKENS];
+// "strength unspecified" sentinel — feed this (per player) when Elo is unknown or
+// you want unconditioned play. Training swaps real buckets to it for a fraction of
+// games so the model learns that mode too. Must stay last (pure append).
+export const ELO_ANY_TOKEN = '<elo-any>';
+export const STRUCTURAL_TOKENS = [BOS_TOKEN, EOS_TOKEN, ...ELO_TOKENS, ELO_ANY_TOKEN];
 
 // Map a numeric Elo to its bucket token. Must match elo_bucket_token() in
 // chess-tokeniser/vocab.py so training data and the harness agree.

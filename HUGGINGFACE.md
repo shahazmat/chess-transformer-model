@@ -178,6 +178,11 @@ Verify either way in the browser at
 > **Tip.** Lower `--min-elo` (`-e MIN_ELO=…`) if you want the low `<elo-*>`
 > buckets populated — needed for the model to convincingly *play weak*.
 
+> **Elo conditioning.** The launcher passes `--elo-dropout 0.15` by default, which
+> swaps each player's Elo bucket for the `<elo-any>` sentinel on ~15% of slots so
+> the model also learns to play *without* an Elo hint. Tune with `-e ELO_DROPOUT=…`
+> (`0` disables it, forcing every game to carry both Elos).
+
 ---
 
 ## 4. Launch the training job (rented GPU)

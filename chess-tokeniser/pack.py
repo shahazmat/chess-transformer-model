@@ -31,10 +31,12 @@ import os
 import pickle
 import time
 
+import random
+
 import numpy as np
 import pyarrow.parquet as pq
 
-from vocab import get_vocab
+from vocab import ELO_ANY, get_vocab
 
 # columns we need from the build_dataset schema
 READ_COLS = ["utc_date", "white_elo", "black_elo", "n_plies", "tokens", "site"]
@@ -69,6 +71,9 @@ def main():
     ap.add_argument("--min-elo", type=int, default=0, help="post-filter: drop games below this (min of both)")
     ap.add_argument("--max-elo", type=int, default=0, help="post-filter: drop games above this (max of both); 0=off")
     ap.add_argument("--min-plies", type=int, default=0, help="post-filter: drop games shorter than this")
+    ap.add_argument("--elo-dropout", type=float, default=0.15,
+                    help="per-slot prob of replacing an Elo bucket with <elo-any>, for unconditioned play; 0=off")
+    ap.add_argument("--seed", type=int, default=1234, help="RNG seed for the Elo-dropout choices (reproducible)")
     ap.add_argument("--batch", type=int, default=50_000)
     args = ap.parse_args()
 
@@ -78,6 +83,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     vocab = get_vocab(args.vocab)
     val_months = set(args.val_months)
+    rng = random.Random(args.seed)   # drives the per-slot Elo dropout, reproducibly
 
     train_path = os.path.join(args.out, "train.bin")
     val_path = os.path.join(args.out, "val.bin")
@@ -109,7 +115,8 @@ def main():
                         n_filtered += 1
                         continue
 
-                    ids, unknown = vocab.encode_game(tokens, w_elo, b_elo)
+                    ids, unknown = vocab.encode_game(tokens, w_elo, b_elo,
+                                                     elo_dropout=args.elo_dropout, rng=rng)
                     if ids is None:
                         n_unknown += 1
                         for u in unknown:
@@ -139,7 +146,8 @@ def main():
                 "bos_id": vocab.bos_id,
                 "eos_id": vocab.eos_id,
                 "core_count": vocab.core_count,
-                "elo_tokens": [t for t in vocab.tokens if t.startswith("<elo-")],
+                "elo_tokens": [t for t in vocab.tokens if t.startswith("<elo-") and t != ELO_ANY],
+                "elo_any_id": vocab.elo_any_id,
             },
             f,
         )
@@ -156,6 +164,7 @@ def main():
         "val_tokens": tok_val,
         "tokens_per_game": round((tok_train + tok_val) / max(1, n_packed), 1),
         "split": ("months:" + ",".join(sorted(val_months))) if val_months else f"frac:{args.val_frac}",
+        "elo_dropout": args.elo_dropout,
         "unknown_token_top": dict(sorted(unknown_examples.items(), key=lambda kv: -kv[1])[:20]),
         "vocab_size": vocab.size,
         "elapsed_sec": round(time.time() - t0, 1),

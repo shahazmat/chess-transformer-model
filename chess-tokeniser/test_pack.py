@@ -7,6 +7,7 @@ The load-bearing claims these guard:
   * Elo bucketing and the parsed dictionary match the JS side byte-for-byte.
 """
 import json
+import random
 import subprocess
 
 import tokeniser as tk
@@ -52,10 +53,11 @@ def _regroup(stream):
 
 def test_vocab_shape():
     v = vb.get_vocab()
-    assert v.size == 5267 and v.core_count == 5242
+    assert v.size == 5268 and v.core_count == 5242
     assert v.tokens[v.bos_id] == "<bos>" and v.tokens[v.eos_id] == "<eos>"
-    elo = [t for t in v.tokens if t.startswith("<elo-")]
-    assert len(elo) == 13 and elo[0] == "<elo-u800>" and elo[-1] == "<elo-3000p>"
+    buckets = [t for t in v.tokens if t.startswith("<elo-") and t != vb.ELO_ANY]
+    assert len(buckets) == 13 and buckets[0] == "<elo-u800>" and buckets[-1] == "<elo-3000p>"
+    assert vb.ELO_ANY in v.stoi and v.tokens[-1] == vb.ELO_ANY   # sentinel appended last
     # vocab v2 is a pure append: bos sits exactly at the old vocab size
     assert v.bos_id == 5252
 
@@ -115,7 +117,7 @@ def test_js_python_vocab_parity():
     probe = "800,799,1234,1600,1899,2999,3000,3200"
     js = (
         "import {TOKENS, eloBucketToken} from './js/vocab.js';"
-        "console.log(JSON.stringify({n: TOKENS.length, tail: TOKENS.slice(-15),"
+        "console.log(JSON.stringify({n: TOKENS.length, tail: TOKENS.slice(-16),"
         f"elo: '{probe}'.split(',').map(e => eloBucketToken(+e))}}));"
     )
     try:
@@ -129,8 +131,29 @@ def test_js_python_vocab_parity():
     assert out.returncode == 0, out.stderr
     data = json.loads(out.stdout)
     assert data["n"] == v.size
-    assert data["tail"] == v.tokens[-15:]
+    assert data["tail"] == v.tokens[-16:]
     assert data["elo"] == [vb.elo_bucket_token(int(e)) for e in probe.split(",")]
+
+
+def test_elo_dropout():
+    v = vb.get_vocab()
+    # full dropout -> both slots become the <elo-any> sentinel
+    ids, _ = v.encode_game("[e4] [e5]", 1834, 1790, elo_dropout=1.0, rng=random.Random(0))
+    assert v.decode(ids)[1:3] == ["<elo-any>", "<elo-any>"]
+    # default (no dropout) -> real buckets, unchanged behaviour
+    assert v.decode(v.encode_game("[e4] [e5]", 1834, 1790)[0])[1:3] == ["<elo-1800>", "<elo-1600>"]
+    # reproducible: same seed -> identical choices
+    a, _ = v.encode_game("[e4]", 1500, 2500, elo_dropout=0.5, rng=random.Random(42))
+    b, _ = v.encode_game("[e4]", 1500, 2500, elo_dropout=0.5, rng=random.Random(42))
+    assert a == b
+    # per-slot & independent: over many draws we see both the sentinel and real buckets
+    r = random.Random(7)
+    seen_any = seen_real = False
+    for _ in range(200):
+        w, b = v.decode(v.encode_game("[e4]", 1500, 2500, elo_dropout=0.5, rng=r)[0])[1:3]
+        seen_any |= "<elo-any>" in (w, b)
+        seen_real |= (w == "<elo-1400>" or b == "<elo-2400>")
+    assert seen_any and seen_real
 
 
 if __name__ == "__main__":

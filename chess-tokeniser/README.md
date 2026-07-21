@@ -42,10 +42,14 @@ Each game is framed with the vocab-v2 structural tokens:
 
 `<bos>`/`<eos>` are the **start/end-game tokens** that separate games in the
 packed stream; the two `<elo-*>` buckets condition the model on each player's
-strength. These live at the end of `../js/vocab-data.js` (ids 5252–5266),
-appended after the nerf tokens without disturbing any pre-existing id.
+strength. `pack.py --elo-dropout P` (default 0.15) independently replaces each
+bucket with the `<elo-any>` sentinel for a fraction of games, so the model also
+learns **unconditioned play** — at inference you can feed `<elo-any>` (per side)
+to omit/neutralise Elo instead of being forced to specify it. These structural
+tokens live at the end of `../js/vocab-data.js` (ids 5252–5267), appended after
+the nerf tokens without disturbing any pre-existing id.
 
-**The training vocabulary is `../js/vocab-data.js` (5,267 tokens), not
+**The training vocabulary is `../js/vocab-data.js` (5,268 tokens), not
 `build_dataset`'s `vocab.json`.** That `vocab.json` is a frequency report over
 one run; the frozen dictionary is the geometry-derived superset of all legal SAN
 that the JS harness, the packed data, and the trained model all share. `pack.py`

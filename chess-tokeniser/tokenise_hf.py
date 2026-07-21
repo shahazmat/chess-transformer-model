@@ -36,6 +36,7 @@ Env vars:
   MIN_ELO / MIN_PLIES / ACCURACY_SOURCE / LIMIT   build_dataset filters
   VAL_MONTHS space-separated months routed to val.bin; empty -> VAL_FRAC split
   VAL_FRAC   per-game val fraction when VAL_MONTHS is empty (default 0.05)
+  ELO_DROPOUT per-slot prob of replacing an Elo bucket with <elo-any> (default 0.15)
   UPLOAD_INTERMEDIATE  "1" (default) also uploads the re-packable parquet under tokenised/
 
 NOTE: starting skeleton, not yet run on HF as-is. Do a cheap validation pass
@@ -80,7 +81,8 @@ print("== Stage 1:", " ".join(build), flush=True)
 subprocess.run(build, cwd=CODE_DIR, check=True)
 
 # ------------------------------------------------------------------ Stage 2: pack
-pack = [sys.executable, "pack.py", "--in", "/tmp/tok", "--out", "/tmp/data", "--vocab", VOCAB]
+pack = [sys.executable, "pack.py", "--in", "/tmp/tok", "--out", "/tmp/data", "--vocab", VOCAB,
+        "--elo-dropout", os.environ.get("ELO_DROPOUT", "0.15")]
 val_months = os.environ.get("VAL_MONTHS", "").split()
 if val_months:
     pack += ["--val-months", *val_months]
