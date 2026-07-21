@@ -6,25 +6,33 @@ trained checkpoint using **Hugging Face** for both data storage and rented GPU
 compute (HF **Jobs**). It complements [TRAINING.md](TRAINING.md) (the *what* and
 *why*) with the exact commands.
 
+> **Windows / PowerShell?** The multi-line commands below use bash
+> line-continuation (a trailing `\`). PowerShell doesn't understand `\` — it runs
+> each line separately, producing errors like `Too small: expected array` and
+> `-v : The term '-v' is not recognized`. Fix: put the whole command **on one
+> line**, or replace each trailing `\` with a backtick `` ` ``, or run it in **Git
+> Bash / WSL**. Also set env vars the PowerShell way — `$env:HF_TOKEN = "hf_…"`,
+> not `export HF_TOKEN=…`.
+
 ## Mental model: what runs where
 
 Two environments, and keeping them separate is what keeps the bill small:
 
 | Stage | Where | Why |
 |---|---|---|
-| **1. Tokenise** (`build_dataset.py`) | your machine or a cheap CPU box | I/O-bound scan of ~30 GB/month of Lichess parquet — never do this on a GPU |
-| **2. Pack** (`pack.py`) | same CPU box | seconds of CPU; produces the `.bin`s |
+| **1. Tokenise** (`build_dataset.py`) | HF **CPU Job** (recommended) or your machine | I/O-bound scan of ~30 GB/month of Lichess parquet — runs *next to the data* on HF; never on a GPU |
+| **2. Pack** (`pack.py`) | same CPU Job / box | seconds of CPU; produces the `.bin`s |
 | **Store** train/val/test | HF **dataset repo** | durable, versioned, mountable into Jobs |
 | **3. Train** (`train_chess_hf.py`) | HF **Jobs** (rented GPU) | the only part that needs a GPU |
 | **Store** checkpoints | HF **model repo** | Jobs storage is ephemeral — push or lose it |
 
 ```
    your machine / CPU box                 Hugging Face
- ┌────────────────────────┐        ┌─────────────────────────┐
+ ┌────────────────────────┐         ┌─────────────────────────┐
  │ build_dataset.py        │        │  dataset repo           │
  │ pack.py                 │  push  │  you/lichess-chess-tokens│
  │  → data/chess/*.bin ────┼───────▶│   train.bin val.bin meta │
- └────────────────────────┘        └───────────┬─────────────┘
+ └────────────────────────┘         └───────────┬─────────────┘
                                                 │ mount/download
                                     ┌───────────▼─────────────┐
                                     │  HF Job (rented GPU)     │
@@ -63,7 +71,7 @@ hf auth login --token hf_xxx  # non-interactive / scripted
 ```
 
 The token is also read from the `HF_TOKEN` environment variable — set that in
-your shell so the training job can forward it (see §3).
+your shell so jobs can forward it with `-s HF_TOKEN`.
 
 ### Enable Jobs (billing)
 
@@ -83,56 +91,92 @@ hf repo create <you>/chess-gpt            --repo-type model
 
 ---
 
-## 1–2. Produce the data (local, CPU)
+## 1–3. Build the dataset
 
-Full details in [chess-tokeniser/README.md](chess-tokeniser/README.md); the short
-version:
+Two ways to produce and store the packed bins. **Option A runs everything on
+HF's machines** — your laptop only launches the job — and is the recommended
+path for the real multi-month run, because `build_dataset.py` scans the Lichess
+parquet *and that data already lives on HF*, so the scan (the wall-clock
+bottleneck) happens next to it instead of streaming ~30 GB to your machine.
+Option B is the local path — handier for quick iteration on the tokeniser.
+
+### Option A — build on HF Jobs (recommended)
+
+One CPU Job does Stage 1 → Stage 2 → upload, via the launcher
+[`chess-tokeniser/tokenise_hf.py`](chess-tokeniser/tokenise_hf.py). Run this from
+the repo root; the `-v` flags mount your local pipeline code into the job (a
+tiny one-time sync — no CPU work on your laptop):
+
+```bash
+export HF_TOKEN=hf_xxx        # write token, forwarded into the job
+
+# cheap validation slice first (8 vCPU, one month, capped) — pennies:
+hf jobs uv run --flavor cpu-upgrade --timeout 1h -s HF_TOKEN \
+  -v ./chess-tokeniser:/code/chess-tokeniser -v ./js:/code/js \
+  -e OUT_REPO=<you>/lichess-chess-tokens \
+  -e MONTHS=2025-05 -e LIMIT=200000 -e MIN_ELO=1600 -e MIN_PLIES=20 -e VAL_FRAC=0.05 \
+  chess-tokeniser/tokenise_hf.py
+
+# the real run (32 vCPU box, all cores used by build_dataset's multiprocessing):
+hf jobs uv run --flavor cpu-performance --timeout 4h -s HF_TOKEN \
+  -v ./chess-tokeniser:/code/chess-tokeniser -v ./js:/code/js \
+  -e OUT_REPO=<you>/lichess-chess-tokens \
+  -e MONTHS="2025-05 2025-06" -e MIN_ELO=1600 -e MIN_PLIES=20 -e VAL_MONTHS=2025-06 \
+  chess-tokeniser/tokenise_hf.py
+```
+
+**Windows / PowerShell** — no `\` continuations; put it on one line and pull the
+code from an HF repo (`-e CODE_REPO=…`) instead of `-v` mounts so there's no
+nested quoting. Upload the pipeline once, then launch:
+
+```powershell
+$env:HF_TOKEN = "hf_xxx"
+hf upload <you>/chess-pipeline ./chess-tokeniser chess-tokeniser --repo-type=dataset
+hf upload <you>/chess-pipeline ./js/vocab-data.js js/vocab-data.js --repo-type=dataset
+
+# validation slice (one line):
+hf jobs uv run --flavor cpu-upgrade --timeout 2h -s HF_TOKEN -e CODE_REPO=<you>/chess-pipeline -e OUT_REPO=<you>/lichess-chess-tokens -e MONTHS=2025-05 -e LIMIT=200000 -e MIN_ELO=1600 -e MIN_PLIES=20 -e VAL_FRAC=0.05 chess-tokeniser/tokenise_hf.py
+
+# full run (one line):
+hf jobs uv run --flavor cpu-performance --timeout 4h -s HF_TOKEN -e CODE_REPO=<you>/chess-pipeline -e OUT_REPO=<you>/lichess-chess-tokens -e MONTHS="2025-05 2025-06" -e MIN_ELO=1600 -e MIN_PLIES=20 -e VAL_MONTHS=2025-06 chess-tokeniser/tokenise_hf.py
+```
+
+Monitor exactly as in §4 (`hf jobs ps` / `logs` / `cancel`, or the printed job
+URL). When it finishes, `train.bin`/`val.bin`/`meta.pkl` are in your dataset repo
+(with the re-packable parquet under `tokenised/`), and **your laptop never
+tokenised anything**.
+
+> If you'd rather not mount local code each run, upload the pipeline to an HF repo
+> once and pass `-e CODE_REPO=<you>/chess-pipeline` instead of the `-v` flags — see
+> the header of [`tokenise_hf.py`](chess-tokeniser/tokenise_hf.py). Either way it
+> all stays on your HF account.
+
+### Option B — build locally, then upload
 
 ```bash
 cd chess-tokeniser
 pip install duckdb pyarrow numpy
 python test_tokeniser.py && python test_pack.py     # sanity check
 
-# Stage 1 — tokenise (reads the public Lichess dataset over hf://, no token needed)
 python build_dataset.py --months 2025-05 2025-06 --out ./tokenised \
     --min-elo 1600 --min-plies 20 --accuracy-source glyph
-
-# Stage 2 — pack into train/val bins (hold out June as validation)
 python pack.py --in ./tokenised --out ./data/chess --val-months 2025-06
-```
 
-You now have `chess-tokeniser/data/chess/{train.bin, val.bin, meta.pkl}`.
-
-> **Want a three-way train/test/val split?** `pack.py` currently emits `train`
-> + `val`. Two options: (a) reserve a third month and run `pack.py` a second
-> time to a different `--out` to produce a `test` set, or (b) ask me to add a
-> `--test-months` flag (small change). nanoGPT only trains on train/val, so the
-> test set is for your own final held-out evaluation.
-
-> **Tip — validate cheaply first.** Use `--limit 200000` on `build_dataset.py`
-> for a fast slice, and lower `--min-elo` if you want the low `<elo-*>` buckets
-> populated (needed for the model to convincingly *play weak*).
-
----
-
-## 3. Upload the data to your dataset repo
-
-`hf upload` takes `REPO_ID  LOCAL_PATH  PATH_IN_REPO`:
-
-```bash
-# put the three files at the root of the dataset repo
+# upload the bins (REPO_ID  LOCAL_PATH  PATH_IN_REPO); Xet/LFS handles large files
 hf upload <you>/lichess-chess-tokens ./data/chess . --repo-type=dataset
-```
-
-Optionally also archive the re-packable parquet intermediate (recommended as the
-*canonical* dataset — it survives a vocab change, since you can re-`pack` it):
-
-```bash
 hf upload <you>/lichess-chess-tokens ./tokenised tokenised --repo-type=dataset
 ```
 
-Large files are handled automatically (Xet/LFS). Verify in the browser at
+Verify either way in the browser at
 `https://huggingface.co/datasets/<you>/lichess-chess-tokens`.
+
+> **Want a three-way train/test/val split?** `pack.py` currently emits `train`
+> + `val`. Either reserve a third month and run `pack.py`/the launcher again to a
+> separate output, or ask me to add a `--test-months` flag. nanoGPT only trains
+> on train/val, so the test set is for your own final held-out evaluation.
+
+> **Tip.** Lower `--min-elo` (`-e MIN_ELO=…`) if you want the low `<elo-*>`
+> buckets populated — needed for the model to convincingly *play weak*.
 
 ---
 
@@ -158,7 +202,7 @@ hf jobs uv run \
   chess-tokeniser/train_chess_hf.py
 ```
 
-- `--flavor` picks the hardware (`hf jobs hardware` lists them all; table in §7).
+- `--flavor` picks the hardware (`hf jobs hardware` lists them all; table in §6).
 - `-s HF_TOKEN` forwards your local `HF_TOKEN` as an **encrypted secret** so the
   script can download/upload repos.
 - `-e KEY=VALUE` sets plain environment variables the script reads.

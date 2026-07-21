@@ -51,6 +51,10 @@ OUT_SCHEMA = pa.schema(
 
 def process_row(row, accuracy_source: str):
     site, utc_date, w_elo, b_elo, tc, result, termination, eco, movetext = row
+    # The real Lichess parquet stores UTCDate as a date (DuckDB returns a
+    # datetime.date); OUT_SCHEMA wants a string. Synthetic data used strings,
+    # so this only bites on the real dataset. str(date) -> 'YYYY-MM-DD'.
+    utc_date = str(utc_date) if utc_date is not None else ""
     game = parse_movetext(movetext)
     if not game.has_evals:
         return None
