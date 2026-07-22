@@ -26,8 +26,13 @@ Configure via environment variables (set with `-e` / `-s` on `hf jobs uv run`):
   MODEL_REPO  (required)  e.g. you/chess-gpt              — model repo for checkpoints
   HF_TOKEN    (secret)    write token; huggingface_hub reads it automatically
   PROFILE     smoke|full  smoke = tiny 4x128 validation net (default); full = 8x512
-  MAX_ITERS   override the iteration count for this job (enables chunked runs)
+  MAX_ITERS   absolute iteration this job stops at (raise it per chunked run)
+  TOTAL_ITERS pin the lr-decay horizon to the final goal, so every chunk of a
+              chunked run decays on the same schedule (default: MAX_ITERS)
   RESUME      1 to continue from the checkpoint in MODEL_REPO (default 0)
+  PUSH_EVERY_MIN  minutes between periodic safety pushes of ckpt.pt while
+              training (default 20; 0 disables) — a killed/timed-out job then
+              costs at most that much progress instead of everything
 
 NOTE: the bare-history transform grades only ~10-25% of each batch's positions
 (the rest are context), so budget more iterations than a vanilla run for the
@@ -343,6 +348,10 @@ cfg = dict(
 )[PROFILE]
 if "MAX_ITERS" in os.environ:
     cfg["max_iters"] = cfg["lr_decay_iters"] = int(os.environ["MAX_ITERS"])
+# Chunked runs: MAX_ITERS is where THIS job stops; TOTAL_ITERS pins the lr
+# schedule to the final goal so every chunk decays on the same curve.
+if "TOTAL_ITERS" in os.environ:
+    cfg["lr_decay_iters"] = int(os.environ["TOTAL_ITERS"])
 
 config = f"""
 dataset = 'chess'
@@ -371,6 +380,35 @@ warmup_iters = {cfg['warmup_iters']}
 with open(os.path.join(NANO, "config", "train_chess.py"), "w") as f:
     f.write(config)
 print("== config\n" + config, flush=True)
+
+# ----------------------------------------------------- 5b. periodic safety push
+# Jobs storage is ephemeral and the final upload only happens if train.py exits
+# cleanly — a timeout or crash mid-run would lose everything. So while training,
+# push the freshest checkpoint every PUSH_EVERY_MIN minutes. Only push files
+# that have sat still for >60s so we never upload a checkpoint mid-torch.save.
+push_every = int(os.environ.get("PUSH_EVERY_MIN", "20"))
+if push_every > 0:
+    import threading
+    import time
+
+    def _pusher():
+        out = os.path.join(NANO, "out")
+        ck = os.path.join(out, "ckpt.pt")
+        last = 0.0
+        while True:
+            time.sleep(60 * push_every)
+            try:
+                if os.path.exists(ck):
+                    mt = os.path.getmtime(ck)
+                    if mt > last and time.time() - mt > 60:
+                        upload_folder(repo_id=MODEL_REPO, repo_type="model", folder_path=out,
+                                      allow_patterns=["ckpt.pt"], commit_message="periodic checkpoint push")
+                        last = mt
+                        print("== periodic checkpoint push done", flush=True)
+            except Exception as e:  # a push hiccup must never kill training
+                print(f"== periodic push failed (will retry): {e}", flush=True)
+
+    threading.Thread(target=_pusher, daemon=True).start()
 
 print("== training", flush=True)
 subprocess.run([sys.executable, "train.py", "config/train_chess.py"], cwd=NANO, check=True)

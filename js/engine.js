@@ -46,8 +46,10 @@
 import { TOKENS, TOKEN_INDEX, NERF_TOKENS, QUALITY_BY_TOKEN, VOCAB_SIZE, isNerfToken, sanToTokens } from './vocab.js';
 
 export const ENGINE_CONFIG = {
-  temperature: 1.0,       // p_i ^ (1/T) over each masked step; 1 = untouched
-  allowNerfTokens: true,  // set false to un-nerf the computer entirely
+  temperature: 1.0,        // p_i ^ (1/T) over each masked step; 1 = untouched
+  allowNerfTokens: false,  // masked: the model plays only its clean branch (full
+                           // strength). true = human-like mode — it may announce
+                           // a nerf and play a deliberately degraded move.
   thinkDelayMs: [350, 900],
 };
 
@@ -117,13 +119,21 @@ export async function pickComputerMove(model, ctx) {
 
   for (let guard = 0; guard < 8; guard++) {
     const first = prefix.length === 0;
-    const allowed = [...new Set(candidates.map((s) => s.tokens[prefix.length]))];
-    if (first && quality === null && ENGINE_CONFIG.allowNerfTokens) allowed.push(...NERF_TOKENS);
+    const legalNext = [...new Set(candidates.map((s) => s.tokens[prefix.length]))];
+    const allowed = first && quality === null && ENGINE_CONFIG.allowNerfTokens
+      ? [...legalNext, ...NERF_TOKENS]
+      : legalNext;
 
     const out = await model.predict({ ...ctx, quality, moveTokens: [...prefix], vocab: TOKENS });
     const dist = maskedDistribution(out, allowed, T);
     if (first && quality === null) {
-      nerfMass = dist.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? dist.probs[i] : 0), 0);
+      // nerfMass is always gauged over legal moves + nerf tokens, so with
+      // allowNerfTokens=false it reports the HYPOTHETICAL chance the model
+      // would have opened this move with a nerf — sampling stays masked.
+      const gauge = ENGINE_CONFIG.allowNerfTokens
+        ? dist
+        : maskedDistribution(out, [...legalNext, ...NERF_TOKENS], T);
+      nerfMass = gauge.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? gauge.probs[i] : 0), 0);
     }
 
     const i = sampleIndex(dist.probs);

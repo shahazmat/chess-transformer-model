@@ -2,6 +2,7 @@ import { Chess } from '../lib/chess.js';
 import { createBoard } from './board.js';
 import { pieceMarkup } from './pieces.js';
 import { createMockModel } from './mock-model.js';
+import { detectRemoteModel } from './remote-model.js';
 import { pickComputerMove, ENGINE_CONFIG } from './engine.js';
 import { VOCAB_SIZE, GLYPH_BY_QUALITY, sanToTokens } from './vocab.js';
 
@@ -9,6 +10,15 @@ const $ = (id) => document.getElementById(id);
 
 let game = new Chess();
 let model = createMockModel();
+// Swap in the real checkpoint when tools/model_server.py is running.
+detectRemoteModel().then((remote) => {
+  if (remote) {
+    model = remote;
+    console.log(`chess-gpt: local model server detected — using "${remote.name}"`);
+  } else {
+    console.log('chess-gpt: no local model server on 127.0.0.1:8123 — using the mock model');
+  }
+});
 let phase = 'setup'; // 'setup' | 'playing' | 'over'
 let humanColor = 'w';
 let opponent = { rating: null, site: null };
@@ -119,7 +129,7 @@ function renderInspector() {
   const chain = r.steps.map((s) => `[${escapeHtml(s.token)}]`).join(' ');
   const lines = [];
   lines.push(`<p>Decoded <strong>${r.san}</strong> as <code>${chain}</code>${r.quality ? ` <em class="${r.quality}">— ${r.quality}</em>` : ''}</p>`);
-  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}</p>`);
+  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'}</p>`);
   r.steps.forEach((step, n) => {
     const max = Math.max(...step.top.map((t) => t.p), 1e-9);
     lines.push(`<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}</p>`);
