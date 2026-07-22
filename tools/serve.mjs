@@ -33,4 +33,4 @@ createServer(async (req, res) => {
     res.writeHead(404, { 'content-type': 'text/plain' });
     res.end('not found');
   }
-}).listen(port, () => console.log(`chess-gpt dev server: http://localhost:${port}`));
+}).listen(port, () => console.log(`GPCT dev server: http://localhost:${port}`));

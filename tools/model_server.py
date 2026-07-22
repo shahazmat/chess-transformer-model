@@ -1,4 +1,4 @@
-"""Local inference server: serve a trained chess-gpt checkpoint to the harness.
+"""Local inference server: serve a trained GPCT checkpoint to the harness.
 
 Milestone 6's "small local inference server behind predict(ctx)". Downloads
 ckpt.pt + meta.pkl from your HF model repo, loads them with the SAME pinned

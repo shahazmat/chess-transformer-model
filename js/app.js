@@ -14,9 +14,9 @@ let model = createMockModel();
 detectRemoteModel().then((remote) => {
   if (remote) {
     model = remote;
-    console.log(`chess-gpt: local model server detected — using "${remote.name}"`);
+    console.log(`GPCT: local model server detected — using "${remote.name}"`);
   } else {
-    console.log('chess-gpt: no local model server on 127.0.0.1:8123 — using the mock model');
+    console.log('GPCT: no local model server on 127.0.0.1:8123 — using the mock model');
   }
 });
 let phase = 'setup'; // 'setup' | 'playing' | 'over'
@@ -74,19 +74,19 @@ function renderStatus() {
     return;
   }
   if (busy) {
-    el.textContent = 'chess-gpt is thinking…';
+    el.textContent = 'GPCT is thinking…';
     el.className = 'status thinking';
     return;
   }
   const yours = game.turn() === humanColor;
   const side = game.turn() === 'w' ? 'White' : 'Black';
-  el.textContent = yours ? `Your move — ${side}${game.inCheck() ? ' (check)' : ''}` : `chess-gpt to move`;
+  el.textContent = yours ? `Your move — ${side}${game.inCheck() ? ' (check)' : ''}` : `GPCT to move`;
   el.className = 'status';
 }
 
 function gameOverText() {
   if (game.isCheckmate()) {
-    const winner = game.turn() === humanColor ? 'chess-gpt wins' : 'you win';
+    const winner = game.turn() === humanColor ? 'GPCT wins' : 'you win';
     return `Checkmate — ${winner}`;
   }
   if (game.isStalemate()) return 'Draw — stalemate';
@@ -303,8 +303,8 @@ function startGame() {
   busy = false;
 
   const you = `Human${opponent.rating ? ` (${opponent.rating}${opponent.site ? ` ${opponent.site}` : ''})` : ''}`;
-  const bot = `chess-gpt [${model.name}]`;
-  game.setHeader('Event', 'chess-gpt skeleton game');
+  const bot = `GPCT [${model.name}]`;
+  game.setHeader('Event', 'GPCT skeleton game');
   game.setHeader('White', humanColor === 'w' ? you : bot);
   game.setHeader('Black', humanColor === 'b' ? you : bot);
   if (opponent.rating) game.setHeader(humanColor === 'w' ? 'WhiteElo' : 'BlackElo', String(opponent.rating));
@@ -357,7 +357,7 @@ window.chessGpt = {
   config: ENGINE_CONFIG,
   setModel(m) {
     model = m;
-    console.log(`chess-gpt: model set to "${m.name ?? 'unnamed'}"`);
+    console.log(`GPCT: model set to "${m.name ?? 'unnamed'}"`);
   },
   loadFen(fen) {
     game.load(fen);

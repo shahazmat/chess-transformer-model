@@ -1,4 +1,4 @@
-# Running the chess-gpt workflow on Hugging Face
+# Running the GPCT workflow on Hugging Face
 
 This is the operational runbook for taking the pipeline in
 [`chess-tokeniser/`](chess-tokeniser/README.md) from raw Lichess games to a

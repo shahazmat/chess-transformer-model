@@ -1,4 +1,4 @@
-# chess-gpt
+# GPCT — Generative Pretrained Chess Transformer
 
 A static-site harness for testing a chess AI that plays by **predicting the
 next token** of a chess game. The AI isn't here yet — a mock model stands in
