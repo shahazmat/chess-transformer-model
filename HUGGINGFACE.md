@@ -142,9 +142,10 @@ hf jobs uv run --flavor cpu-performance --timeout 4h -s HF_TOKEN -e CODE_REPO=<y
 ```
 
 Monitor exactly as in §4 (`hf jobs ps` / `logs` / `cancel`, or the printed job
-URL). When it finishes, `train.bin`/`val.bin`/`meta.pkl` are in your dataset repo
-(with the re-packable parquet under `tokenised/`), and **your laptop never
-tokenised anything**.
+URL). When it finishes, `train.bin`/`val.bin`/`meta.pkl` plus the
+`train.idx.npy`/`val.idx.npy` game indexes are in your dataset repo (with the
+re-packable parquet under `tokenised/`), and **your laptop never tokenised
+anything**.
 
 > If you'd rather not mount local code each run, upload the pipeline to an HF repo
 > once and pass `-e CODE_REPO=<you>/chess-pipeline` instead of the `-v` flags — see
@@ -312,7 +313,7 @@ real one (the page console names the live model; the server owns the
 bare-history context assembly documented in [`js/engine.js`](js/engine.js)).
 Restart the server after pushing a new checkpoint to pick it up. ONNX /
 transformers.js in-browser inference remains the polished follow-up. The
-model's output vocabulary is the 5,268-token space in
+model's output vocabulary is the 5,273-token space in
 [`js/vocab-data.js`](js/vocab-data.js); `meta.pkl` carries the matching
 `stoi`/`itos`.
 

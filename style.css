@@ -89,8 +89,9 @@ header p { margin: 2px 0 0; color: var(--muted); }
 .piece.black .detail { fill: #cfc6b4; stroke: none; }
 .piece.black .slit { stroke: #cfc6b4; }
 
-/* promotion picker */
-#promo {
+/* board overlays: promotion picker + draw-offer dialog */
+#promo,
+#draw-offer {
   position: absolute;
   inset: 0;
   display: flex;
@@ -98,7 +99,8 @@ header p { margin: 2px 0 0; color: var(--muted); }
   justify-content: center;
   background: rgba(43, 37, 29, 0.45);
 }
-#promo[hidden] { display: none; }
+#promo[hidden],
+#draw-offer[hidden] { display: none; }
 .promo-box {
   background: var(--panel);
   border: 1px solid var(--line);
@@ -117,6 +119,17 @@ header p { margin: 2px 0 0; color: var(--muted); }
 }
 .promo-pieces button:hover { background: var(--sq-dark); }
 .promo-pieces svg { width: 100%; height: 100%; }
+
+.offer-buttons { display: flex; gap: 8px; justify-content: center; }
+.offer-buttons button {
+  padding: 8px 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--sq-light);
+  font: inherit;
+  cursor: pointer;
+}
+.offer-buttons button:hover { background: var(--sq-dark); }
 
 /* side panel */
 .side { flex: 0 1 300px; min-width: 260px; display: flex; flex-direction: column; gap: 16px; }

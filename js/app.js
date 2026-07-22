@@ -31,6 +31,9 @@ let moveRecords = [];         // one record per ply: computer plies keep the ful
                               // pickComputerMove() result; human plies { san, human }
 let viewPly = null;           // null = live; else the number of plies shown (review mode)
 let pendingPromotion = null;
+let pendingDrawOffer = null;  // resolve fn of the open draw-offer dialog
+let drawDeclined = false;     // human declined once -> <draw> masked all game
+let gameOutcome = null;       // { result, reason } for resignation / agreed draw
 let tokenStream = [];         // the game as a BARE flat token stream — never
                               // contains nerf tokens (the bare-history training
                               // contract; see chess-tokeniser/nerf_batch.py)
@@ -91,6 +94,11 @@ function renderStatus() {
     el.className = 'status over';
     return;
   }
+  if (pendingDrawOffer) {
+    el.textContent = 'GPCT offers a draw';
+    el.className = 'status thinking';
+    return;
+  }
   if (busy) {
     el.textContent = 'GPCT is thinking…';
     el.className = 'status thinking';
@@ -103,6 +111,8 @@ function renderStatus() {
 }
 
 function gameOverText() {
+  if (gameOutcome?.reason === 'resign') return 'GPCT resigns — you win';
+  if (gameOutcome?.reason === 'draw-agreed') return 'Draw agreed';
   if (game.isCheckmate()) {
     const winner = game.turn() === humanColor ? 'GPCT wins' : 'you win';
     return `Checkmate — ${winner}`;
@@ -159,7 +169,11 @@ function renderInspector() {
   const chain = r.steps.map((s) => `[${escapeHtml(s.token)}]`).join(' ');
   const lines = [];
   lines.push(`<p>Decoded <strong>${r.san}</strong> as <code>${chain}</code>${r.quality ? ` <em class="${r.quality}">— ${r.quality}</em>` : ''}</p>`);
-  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'} · P(#) ${pct(r.mate?.p ?? 0)}${r.mate?.available ? ' — <strong>mate available</strong>' : ''}</p>`);
+  const endGauges = r.pDraw !== undefined || r.pResign !== undefined
+    ? ` · P(draw) ${pct(r.pDraw ?? 0)} · P(resign) ${pct(r.pResign ?? 0)}`
+      + (r.pOppResign ? ` · P(you resign) ${pct(r.pOppResign)}` : '')
+    : '';
+  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'} · P(#) ${pct(r.mate?.p ?? 0)}${r.mate?.available ? ' — <strong>mate available</strong>' : ''}${endGauges}</p>`);
   if (r.topMoves && r.topMoves.length) {
     const cands = r.topMoves
       .map((m) => `<span class="cand${m.san === r.sampledSan ? ' on' : ''}">${escapeHtml(m.san)} <span class="cp">${pct(m.p)}</span></span>`)
@@ -174,7 +188,7 @@ function renderInspector() {
     lines.push('<div class="bars">');
     for (const t of step.top) {
       lines.push(
-        `<div class="bar-row${t.nerf ? ' special' : ''}${t.token === step.token ? ' sampled' : ''}">` +
+        `<div class="bar-row${t.special ? ' special' : ''}${t.token === step.token ? ' sampled' : ''}">` +
         `<span class="tok">${escapeHtml(t.token)}</span>` +
         `<span class="bar"><span style="width:${Math.max(1.5, (t.p / max) * 100)}%"></span></span>` +
         `<span class="pct">${pct(t.p)}</span></div>`,
@@ -189,7 +203,7 @@ function renderInspector() {
 
 function onSquareClick(square) {
   if (viewPly !== null) return; // reviewing: board is read-only until back at live
-  if (phase !== 'playing' || busy || game.turn() !== humanColor || pendingPromotion) return;
+  if (phase !== 'playing' || busy || game.turn() !== humanColor || pendingPromotion || pendingDrawOffer) return;
 
   if (selected && targetMoves.has(square)) {
     const moves = targetMoves.get(square);
@@ -257,7 +271,7 @@ $('moves').addEventListener('click', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if (phase === 'setup' || pendingPromotion) return;
+  if (phase === 'setup' || pendingPromotion || pendingDrawOffer) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); stepView(-1); }
@@ -287,13 +301,34 @@ async function computerTurn() {
     turn: game.turn(),
     opponent,
     legalMoves: game.moves(),
+    excludeDraw: drawDeclined,
   };
   try {
-    const result = await pickComputerMove(model, ctx);
+    let result = await pickComputerMove(model, ctx);
+
+    if (result.drawOffer && !(await offerDraw())) {
+      // Declined: <draw> stays masked for the rest of the game; decode a
+      // normal move from the same position (predict() calls hit the server
+      // again, but it is a single position).
+      drawDeclined = true;
+      result = await pickComputerMove(model, { ...ctx, excludeDraw: true });
+    }
+    if (result.drawOffer) { // offer stood and was accepted
+      busy = false;
+      endGame({ result: '1/2-1/2', reason: 'draw-agreed' });
+      return;
+    }
+    if (result.resign) {
+      busy = false;
+      endGame({ result: humanColor === 'w' ? '1-0' : '0-1', reason: 'resign' });
+      return;
+    }
+
     game.move(result.san);
     // Deliberately NOT pushing result.nerf into the stream: history stays bare
     // (the model is trained with past nerfs stripped). The quality lives on in
-    // `annotations` for the move list.
+    // `annotations` for the move list. End tokens never reach the stream either
+    // — the game is over, or the offer was declined and the token rejected.
     tokenStream.push(...result.tokens);
     if (result.quality) annotations.set(game.history().length - 1, result.quality);
     moveRecords.push(result);
@@ -310,13 +345,15 @@ async function computerTurn() {
   if (game.isGameOver()) endGame();
 }
 
-function endGame() {
+function endGame(outcome = null) {
+  gameOutcome = outcome; // null = ended by the rules; else resign / agreed draw
   phase = 'over';
   game.setHeader('Result', resultTag());
   render();
 }
 
 function resultTag() {
+  if (gameOutcome) return gameOutcome.result;
   if (!game.isCheckmate()) return '1/2-1/2';
   return game.turn() === 'b' ? '1-0' : '0-1';
 }
@@ -344,6 +381,28 @@ $('promo').addEventListener('click', (e) => {
     clearSelection();
     render();
   }
+});
+
+// --------------------------------------------------------------- draw offer
+
+// The engine sampled <draw>: show the dialog and resolve to the human's
+// answer. Unlike the promotion picker, clicking the scrim does NOT dismiss —
+// an offer deserves an explicit Accept or Decline.
+function offerDraw() {
+  return new Promise((resolve) => {
+    pendingDrawOffer = resolve;
+    $('draw-offer').hidden = false;
+    render(); // status line: "GPCT offers a draw"
+  });
+}
+
+$('draw-offer').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-answer]');
+  if (!btn || !pendingDrawOffer) return;
+  const resolve = pendingDrawOffer;
+  pendingDrawOffer = null;
+  $('draw-offer').hidden = true;
+  resolve(btn.dataset.answer === 'accept');
 });
 
 // ------------------------------------------------------------------ setup
@@ -381,6 +440,10 @@ function startGame() {
   moveRecords = [];
   viewPly = null;
   tokenStream = [];
+  drawDeclined = false;
+  gameOutcome = null;
+  pendingDrawOffer = null;
+  $('draw-offer').hidden = true;
   clearSelection();
   phase = 'playing';
   busy = false;
@@ -407,10 +470,14 @@ $('new-game').addEventListener('click', () => {
   moveRecords = [];
   viewPly = null;
   tokenStream = [];
+  drawDeclined = false;
+  gameOutcome = null;
+  pendingDrawOffer = null;
   clearSelection();
   busy = false;
   pendingPromotion = null;
   $('promo').hidden = true;
+  $('draw-offer').hidden = true;
   $('setup').hidden = false;
   $('play').hidden = true;
   render();
@@ -449,6 +516,10 @@ window.chessGpt = {
     moveRecords = [];
     viewPly = null;
     tokenStream = [];
+    drawDeclined = false;
+    gameOutcome = null;
+    pendingDrawOffer = null;
+    $('draw-offer').hidden = true;
     clearSelection();
     phase = 'playing';
     $('setup').hidden = true;

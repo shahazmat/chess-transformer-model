@@ -56,13 +56,15 @@ core (source file + destination), piece cores may carry file / rank / square
 disambiguators (`Nbd7`, `R1e2`, `Qh4e1`). `sanToTokens()` / `tokensToSan()`
 in [js/vocab.js](js/vocab.js) convert both ways.
 
-The vocabulary is **5,252 tokens**:
+The vocabulary is **5,273 tokens**:
 
 | group | count |
 | --- | --- |
 | core moves (pawn 176, N/B/R/Q/K 5,064, castling 2, generated geometrically) | 5,242 |
 | modifiers `+` `#` `x` `=Q` `=R` `=B` `=N` | 7 |
 | nerf `<inaccuracy>` `<mistake>` `<blunder>` | 3 |
+| structural `<bos>` `<eos>` + 13 `<elo-*>` buckets + `<elo-any>` (vocab v2) | 16 |
+| game-end `<white/black-resign>` `<white/black-flag>` `<draw>` (vocab v3 — the engine resigns / offers you a draw when it samples its own action; flags are training-signal only) | 5 |
 
 Core generation is a deterministic, slightly loose superset of real SAN
 (every core is geometrically possible on an empty board; impossible ones are

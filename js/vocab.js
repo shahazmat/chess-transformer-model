@@ -49,9 +49,36 @@ export const ELO_TOKENS = [
 ];
 // "strength unspecified" sentinel — feed this (per player) when Elo is unknown or
 // you want unconditioned play. Training swaps real buckets to it for a fraction of
-// games so the model learns that mode too. Must stay last (pure append).
+// games so the model learns that mode too. (vocab v3 appended the end tokens
+// after it — the invariant is pure append, never reorder.)
 export const ELO_ANY_TOKEN = '<elo-any>';
 export const STRUCTURAL_TOKENS = [BOS_TOKEN, EOS_TOKEN, ...ELO_TOKENS, ELO_ANY_TOKEN];
+
+// vocab v3 — game-end tokens, appended after the structural block. The packer
+// emits one just before <eos> naming HOW the game ended and WHO acted, so the
+// model learns to SAY how games end. Resignations are colour-differentiated
+// because they happen on either turn (players often resign right after their
+// own move) — colour cannot be inferred from parity. Flags are colour-
+// differentiated for uniformity (the flagging side is always the side to
+// move). <draw> carries no colour: the outcome is symmetric.
+//
+// During play only two are ever sampleable, and only as the FIRST token of
+// the computer's move: the engine's OWN resign token (it resigns) and <draw>
+// (it offers you a draw; declining masks <draw> for the rest of the game).
+// The opponent's resign token and both flag tokens are gauges only. None of
+// them ever enter the fed-back history — the game is over, or the offer was
+// declined and the token rejected.
+export const WHITE_RESIGN_TOKEN = '<white-resign>';
+export const BLACK_RESIGN_TOKEN = '<black-resign>';
+export const WHITE_FLAG_TOKEN = '<white-flag>';
+export const BLACK_FLAG_TOKEN = '<black-flag>';
+export const DRAW_TOKEN = '<draw>';
+export const END_TOKENS = [
+  WHITE_RESIGN_TOKEN, BLACK_RESIGN_TOKEN, WHITE_FLAG_TOKEN, BLACK_FLAG_TOKEN, DRAW_TOKEN,
+];
+
+// The resign token belonging to the side to move ('w' | 'b').
+export const resignTokenFor = (turn) => (turn === 'w' ? WHITE_RESIGN_TOKEN : BLACK_RESIGN_TOKEN);
 
 // Map a numeric Elo to its bucket token. Must match elo_bucket_token() in
 // chess-tokeniser/vocab.py so training data and the harness agree.
@@ -84,13 +111,14 @@ export const VOCAB_SIZE = TOKENS.length;
 // drifted.
 {
   const tail = TOKENS.slice(CORE_COUNT);
-  const expected = [...MODIFIER_TOKENS, ...NERF_TOKENS, ...STRUCTURAL_TOKENS];
+  const expected = [...MODIFIER_TOKENS, ...NERF_TOKENS, ...STRUCTURAL_TOKENS, ...END_TOKENS];
   if (tail.length !== expected.length || tail.some((t, i) => t !== expected[i])) {
     throw new Error('vocab-data.js is out of sync with vocab.js — regenerate it: node tools/build-vocab.mjs');
   }
 }
 
 export const isNerfToken = (t) => Object.hasOwn(QUALITY_BY_TOKEN, t);
+export const isEndToken = (t) => END_TOKENS.includes(t);
 
 const SAN_RE = /^([KQRBN]?[a-h]?[1-8]?)(x?)([a-h][1-8])(=[QRBN])?([+#])?$/;
 const CASTLE_RE = /^(O-O(?:-O)?)([+#])?$/;

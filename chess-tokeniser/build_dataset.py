@@ -40,6 +40,8 @@ OUT_SCHEMA = pa.schema(
         ("black_elo", pa.int16()),
         ("time_control", pa.string()),
         ("result", pa.string()),
+        ("termination", pa.string()),       # Lichess Termination header — drives the
+                                            # <resign>/<draw> game-end token in pack.py
         ("eco", pa.string()),
         ("n_plies", pa.int16()),
         ("tokens", pa.large_string()),      # space-joined token stream
@@ -66,6 +68,7 @@ def process_row(row, accuracy_source: str):
         int(b_elo or 0),
         tc,
         result,
+        termination,
         eco,
         len(game.plies),
         " ".join(tokens),
@@ -153,11 +156,12 @@ def main():
             for out, errs in pool.map(_worker, jobs):
                 n_errors += errs
                 for rec in out:
-                    if rec[7] < args.min_plies:
+                    # positional indices into OUT_SCHEMA: 8=n_plies, 9=tokens, 11=n_disagreements
+                    if rec[8] < args.min_plies:
                         continue
-                    vocab.update(rec[8].split(" "))
-                    total_plies += rec[7]
-                    n_dis_plies += rec[10]
+                    vocab.update(rec[9].split(" "))
+                    total_plies += rec[8]
+                    n_dis_plies += rec[11]
                     shard_rows.append(rec)
                     n_games += 1
             flush()

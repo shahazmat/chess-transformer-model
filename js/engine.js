@@ -29,6 +29,8 @@
 //                    token, every later predict() call for this move has
 //                    quality set to 'inaccuracy' | 'mistake' | 'blunder' —
 //                    the model is now conditioned on "this move is a <quality>".
+//     excludeDraw:   true once the human has declined a draw offer this game —
+//                    <draw> is then masked for every remaining move.
 //     vocab:         the token list (index i of a vector output = probability
 //                    of vocab[i])
 //   }
@@ -37,13 +39,22 @@
 //   1. tokenize every legal move; the sequences form a prefix tree
 //   2. at each step, mask the model's distribution down to the tokens that
 //      can continue some legal sequence (plus, on the very first step, the
-//      three nerf tokens) — all illegal tokens get probability zero
+//      three nerf tokens, the engine's OWN colour's resign token, and
+//      <draw>) — all illegal tokens get probability zero. The opponent's
+//      resign token and the <white/black-flag> tokens are never sampleable;
+//      they exist as training signal and inspector gauges.
 //   3. renormalize, sample
 //   4. nerf token drawn -> remember the quality, restart decoding with
 //      quality set and nerf tokens masked out
-//   5. a core token completes the sequence -> play the matching SAN
+//   5. own resign token drawn -> return { resign: true } (the engine
+//      resigns); <draw> drawn -> return { drawOffer: true } (app.js runs the
+//      dialog, and on decline re-decodes with ctx.excludeDraw set)
+//   6. a core token completes the sequence -> play the matching SAN
 
-import { TOKENS, TOKEN_INDEX, NERF_TOKENS, QUALITY_BY_TOKEN, VOCAB_SIZE, isNerfToken, sanToTokens } from './vocab.js';
+import {
+  TOKENS, TOKEN_INDEX, NERF_TOKENS, QUALITY_BY_TOKEN, VOCAB_SIZE,
+  DRAW_TOKEN, END_TOKENS, resignTokenFor, isNerfToken, isEndToken, sanToTokens,
+} from './vocab.js';
 
 export const ENGINE_CONFIG = {
   temperature: 0.7,        // p_i ^ (1/T) over each masked step; <1 sharpens
@@ -58,13 +69,23 @@ export const ENGINE_CONFIG = {
                            // when it is available (the model still picks WHICH
                            // mate). The model tags most mates as check, so a mere
                            // probability boost isn't enough — this is a hard rule.
+  allowResign: true,       // the model may sample its own colour's resign token
+                           // as its move: it resigns and you win. (forceMate
+                           // outranks it — with a mate on the board the engine
+                           // always mates.)
+  allowDrawOffer: true,    // the model may sample <draw>: a draw-offer dialog
+                           // opens; declining masks <draw> for the rest of the
+                           // game and the engine decodes a normal move instead.
   thinkDelayMs: [350, 900],
 };
 
 // Adapt the accepted output shapes to a single token -> probability fn.
+let warnedOutputLength = false; // once per session — an old 5268-wide checkpoint
+                                // is fine (missing tail tokens read as p=0)
 function lookupFor(output) {
   if (output instanceof Float32Array || output instanceof Float64Array || Array.isArray(output)) {
-    if (output.length !== VOCAB_SIZE) {
+    if (output.length !== VOCAB_SIZE && !warnedOutputLength) {
+      warnedOutputLength = true;
       console.warn(`model output has length ${output.length}, vocabulary has ${VOCAB_SIZE} tokens`);
     }
     return (token) => {
@@ -87,9 +108,10 @@ function maskedDistribution(output, allowed, temperature) {
   if (temperature !== 1) probs = probs.map((v) => (v > 0 ? v ** (1 / temperature) : 0));
   let sum = probs.reduce((a, b) => a + b, 0);
   if (sum <= 0) {
-    // Degenerate model output (no mass on any allowed token): uniform fallback.
+    // Degenerate model output (no mass on any allowed token): uniform fallback
+    // over the real moves only — never nerf/end tokens by accident.
     console.warn('model put zero mass on every allowed token — falling back to uniform');
-    probs = allowed.map((t) => (isNerfToken(t) ? 0 : 1));
+    probs = allowed.map((t) => (isNerfToken(t) || isEndToken(t) ? 0 : 1));
     sum = probs.reduce((a, b) => a + b, 0);
   }
   return { tokens: allowed, probs: probs.map((v) => v / sum) };
@@ -108,7 +130,7 @@ function sampleIndex(probs) {
 // Top-of-distribution view for the UI inspector.
 function topOf({ tokens, probs }, limit = 5) {
   return tokens
-    .map((t, i) => ({ token: t, p: probs[i], nerf: isNerfToken(t) }))
+    .map((t, i) => ({ token: t, p: probs[i], special: isNerfToken(t) || isEndToken(t) }))
     .sort((a, b) => b.p - a.p)
     .slice(0, limit);
 }
@@ -150,7 +172,7 @@ export async function pickComputerMove(model, ctx) {
   // ---- gauges over the FULL legal set, unconditioned first step ----
   const out0 = await predict([], null);
   const firstAll = [...new Set(allSeqs.map((s) => s.tokens[0]))];
-  const gaugeDist = maskedDistribution(out0, [...firstAll, ...NERF_TOKENS], T);
+  const gaugeDist = maskedDistribution(out0, [...firstAll, ...NERF_TOKENS, ...END_TOKENS], T);
   const nerfMass = gaugeDist.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? gaugeDist.probs[i] : 0), 0);
   const gi = gaugeDist.tokens.indexOf('#');
   const rawSharp = lookupFor(out0)('#');
@@ -161,6 +183,20 @@ export async function pickComputerMove(model, ctx) {
     available: firstAll.includes('#'),
     p: gi !== -1 ? gaugeDist.probs[gi] : (Number.isFinite(rawSharp) && rawSharp > 0 ? rawSharp : 0),
   };
+  // End-token gauges for the inspector: the model's masked belief that the
+  // side to move should resign, that the OPPONENT is about to resign (a
+  // win-confidence tell — that token is never sampleable), and that the game
+  // should be drawn. Old 5268-wide checkpoints have no mass on any of them,
+  // so all read 0 and the tokens are never sampled.
+  const gaugeP = (tok) => {
+    const i = gaugeDist.tokens.indexOf(tok);
+    return i !== -1 ? gaugeDist.probs[i] : 0;
+  };
+  const ownResignToken = resignTokenFor(ctx.turn);
+  const oppResignToken = resignTokenFor(ctx.turn === 'w' ? 'b' : 'w');
+  const pResign = gaugeP(ownResignToken);
+  const pOppResign = gaugeP(oppResignToken);
+  const pDraw = gaugeP(DRAW_TOKEN);
 
   // ---- restrict clean play to the model's top-K legal moves (+ any mate) ----
   let topMoves = null;
@@ -185,8 +221,19 @@ export async function pickComputerMove(model, ctx) {
   for (let guard = 0; guard < 8; guard++) {
     const first = prefix.length === 0;
     const legalNext = [...new Set(candidates.map((s) => s.tokens[prefix.length]).filter((t) => t !== undefined))];
-    const allowed = first && quality === null && ENGINE_CONFIG.allowNerfTokens
-      ? [...legalNext, ...NERF_TOKENS]
+    // Special tokens are only ever candidates on the very first, unconditioned
+    // step of a move: nerf tokens (config-gated) and the engine's OWN end
+    // actions — its own colour's resign token and <draw>. The opponent's
+    // resign token and the flag tokens are never sampleable (they are not the
+    // engine's actions), and a move committed to a quality is never a
+    // resignation or a draw offer.
+    const allowed = first && quality === null
+      ? [
+          ...legalNext,
+          ...(ENGINE_CONFIG.allowNerfTokens ? NERF_TOKENS : []),
+          ...(ENGINE_CONFIG.allowResign ? [ownResignToken] : []),
+          ...(ENGINE_CONFIG.allowDrawOffer && !ctx.excludeDraw ? [DRAW_TOKEN] : []),
+        ]
       : legalNext;
 
     const dist = maskedDistribution(await predict(prefix, quality), allowed, T);
@@ -199,6 +246,24 @@ export async function pickComputerMove(model, ctx) {
     const i = mateIdx !== -1 ? mateIdx : sampleIndex(dist.probs);
     const token = dist.tokens[i];
     steps.push({ token, p: dist.probs[i], top: topOf(dist), forced: mateIdx !== -1 });
+
+    if (isEndToken(token)) {
+      // Game-end action sampled instead of a move — hand control to app.js:
+      // the engine's own resign token ends the game outright, <draw> opens
+      // the offer dialog (and a decline re-enters pickComputerMove with
+      // ctx.excludeDraw set). Only those two can ever be sampled here.
+      return {
+        ...(token === ownResignToken ? { resign: true } : { drawOffer: true }),
+        steps,
+        nerfMass,
+        mate,
+        pResign,
+        pOppResign,
+        pDraw,
+        topMoves,
+        legalCount: ctx.legalMoves.length,
+      };
+    }
 
     if (isNerfToken(token)) {
       // Nerfed: re-decode from scratch, conditioned on the drawn quality. Drop
@@ -222,6 +287,9 @@ export async function pickComputerMove(model, ctx) {
         nerf,
         nerfMass,
         mate,             // { available, p } — the P('#') gauge for the UI
+        pResign,          // masked P(own resign token) on this turn (inspector)
+        pOppResign,       // masked P(opponent's resign token) — win-confidence tell
+        pDraw,            // masked P(<draw>) on this turn (inspector)
         topMoves,         // [{ san, p }] the restricted pool, or null when off
         sampledSan: complete.san,
         legalCount: ctx.legalMoves.length,

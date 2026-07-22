@@ -16,12 +16,16 @@
 //    opponent -> the mock blunders more often); the rating *site* is
 //    deliberately unused — a real model might embed it, since 1500 lichess
 //    and 1500 chess.com are different strengths
+//  - likewise it puts mass on its own colour's resign token and on <draw>:
+//    resignation grows with its material deficit, a small draw-offer mass
+//    appears in low-material dead-equal positions — so the harness's
+//    resign/draw-offer flows are exercisable without a trained checkpoint
 //  - when re-queried with ctx.quality set, reshapes the move distribution:
 //    'inaccuracy' plays sloppily, 'mistake' prefers bad moves, 'blunder'
 //    actively hunts for the worst move on the board
 
 import { Chess } from '../lib/chess.js';
-import { TOKEN_INDEX, VOCAB_SIZE, NERF_TOKENS, sanToTokens } from './vocab.js';
+import { TOKEN_INDEX, VOCAB_SIZE, NERF_TOKENS, DRAW_TOKEN, resignTokenFor, sanToTokens } from './vocab.js';
 
 const VAL = { p: 1, n: 3, b: 3.1, r: 5, q: 9, k: 0 };
 
@@ -71,6 +75,24 @@ function nerfMasses(rating) {
   return [0.02 + 0.10 * w, 0.012 + 0.08 * w, 0.006 + 0.09 * w];
 }
 
+// Probability of ending the game outright on this move: <resign> grows with
+// the mock's material deficit, <draw> appears in low-material dead-equal
+// positions. (A real checkpoint learns both from the game-end tokens.)
+function endMasses(game) {
+  let balance = 0;   // + = side to move is ahead
+  let material = 0;  // everything but kings, both sides
+  for (const row of game.board()) {
+    for (const cell of row) {
+      if (!cell || cell.type === 'k') continue;
+      material += VAL[cell.type];
+      balance += cell.color === game.turn() ? VAL[cell.type] : -VAL[cell.type];
+    }
+  }
+  const resign = balance <= -9 ? 0.35 : balance <= -5 ? 0.10 : 0;
+  const draw = material <= 8 && Math.abs(balance) <= 1 ? 0.15 : 0;
+  return { resign, draw };
+}
+
 export function createMockModel() {
   return {
     name: 'mock (greedy heuristic + noise)',
@@ -87,11 +109,14 @@ export function createMockModel() {
       const seqs = moves.map((m) => sanToTokens(m.san));
       const prefix = ctx.moveTokens ?? [];
 
-      let nerfMass = 0;
+      let reserved = 0; // mass claimed by nerf + end tokens on the first step
       if (prefix.length === 0 && !ctx.quality) {
         const masses = nerfMasses(ctx.opponent?.rating);
         NERF_TOKENS.forEach((t, i) => { out[TOKEN_INDEX.get(t)] = masses[i]; });
-        nerfMass = masses.reduce((a, b) => a + b, 0);
+        const ends = endMasses(game);
+        out[TOKEN_INDEX.get(resignTokenFor(game.turn()))] = ends.resign;
+        out[TOKEN_INDEX.get(DRAW_TOKEN)] = ends.draw;
+        reserved = masses.reduce((a, b) => a + b, 0) + ends.resign + ends.draw;
       }
 
       // Next-token marginals of the move distribution, given the prefix.
@@ -107,7 +132,7 @@ export function createMockModel() {
       });
       if (denom > 0) {
         for (const [token, p] of marginal) {
-          out[TOKEN_INDEX.get(token)] = (p / denom) * (1 - nerfMass);
+          out[TOKEN_INDEX.get(token)] = (p / denom) * (1 - reserved);
         }
       }
       return out;
