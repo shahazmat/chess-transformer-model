@@ -16,6 +16,14 @@ nerf tokens derived from real engine evaluations, packed into nanoGPT's
 > games so the model also learns unconditioned play (inference can omit Elo). What
 > remains is *running* the training (Stages/milestones 4–6), not building the
 > data pipeline.
+>
+> **Update (2026-07-22): bare-history nerf training is implemented.**
+> `train_chess_hf.py` (nanoGPT now pinned) reroutes `get_batch` through
+> [`chess-tokeniser/nerf_batch.py`](chess-tokeniser/nerf_batch.py) so a nerf
+> token is only ever in context beside the move it labels (see the
+> "Bare-history rule" in §5), and the harness keeps `historyTokens` bare to
+> match ([`js/app.js`](js/app.js)). Any checkpoint trained before this scheme
+> is obsolete — re-run the smoke before trusting any metric.
 
 ## 1. Source: the Lichess open database
 
@@ -168,6 +176,34 @@ readable token streams).
   conditioned Elo bucket, (4) per-move NLL on val (comparable across
   tokenizer changes; per-token loss is not).
 
+### The bare-history rule (nerf tokens in training)
+
+The packed stream stores games **fully annotated**, but the model must never
+*rely* on annotated history: at inference the human's moves are never
+annotated (there is no engine), and the harness keeps even the computer's own
+emitted nerfs out of `historyTokens`. So training enforces, at batch time:
+
+> a nerf token may appear in the context only while the move it labels is
+> being predicted (final history token, or mid-move); every later prediction
+> sees the game with that nerf removed.
+
+One packed row can't serve all positions at once (a token is either in the
+row or not), so [`nerf_batch.py`](chess-tokeniser/nerf_batch.py) — installed
+into nanoGPT's `get_batch` by `train_chess_hf.py` — converts each sampled
+window into one consistent view: nerf tokens cut each game into segments
+(one per annotated move, cut *after* the move, plus a tail); one segment per
+game is chosen uniformly; every other nerf is deleted; and loss applies only
+to the chosen segments — targets elsewhere, targets across a deletion seam
+(a stripped move must not be graded as clean — that would poison the clean
+branch), and `<bos>`/`<elo-*>` framing targets are masked to `-1`, which
+nanoGPT's `cross_entropy(ignore_index=-1)` skips. `test_nerf_batch.py` pins
+the exact hand-worked rows.
+
+Two consequences to plan around: only ~10–25% of each batch is graded, so
+budget more iterations than a vanilla run (smoke: `-e MAX_ITERS=6000`); and
+**losses are not comparable** with checkpoints trained without the transform
+(different task, different averaging set).
+
 ## 6. Milestones
 
 | # | deliverable | check | status |
@@ -176,7 +212,8 @@ readable token streams).
 | 1 | `build_dataset.py` → tokenised parquet | 0 SAN parse errors on real games | ✅ |
 | 2 | labeller (`tokeniser.classify`, Lichess win%-drop thresholds) | blunder-rate vs Elo plot is monotone | 🟡 code done; sanity plot not yet scripted |
 | 3 | vocab v2 (`<bos>`/`<eos>`/`<elo-*>`) + Python tokenizer (`vocab.py`) | round-trips vs `vocab-data.js` ids | ✅ `test_pack.py` (round-trip + JS↔Python parity) |
-| 4 | `pack.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard | 🟡 bins produced + verified; smoke run pending |
+| 4 | `pack.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard | 🟡 bins produced + verified; smoke run pending (re-run: pre-bare-history ckpt is obsolete) |
+| 4.5 | bare-history nerf batching (`nerf_batch.py`, patched `get_batch`, bare `historyTokens`) | `test_nerf_batch.py` reproduces the hand-worked rows; probe model sees bare history in the harness | ✅ |
 | 5 | 8×512 run on 15–20M games | pre-mask legal mass ≫ 99%; nerf rate tracks Elo | ⬜ |
 | 6 | export checkpoint behind `predict(ctx)` (ONNX / transformers.js or a local server) and plug into `window.chessGpt.setModel` | play it in the harness | ⬜ |
 

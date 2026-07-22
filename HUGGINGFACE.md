@@ -214,6 +214,14 @@ hf jobs uv run \
 - The default UV image installs a **CUDA build of torch** automatically on GPU
   flavors, so no custom image is needed.
 
+> **The job auto-applies the bare-history nerf transform** (TRAINING.md §5):
+> `train_chess_hf.py` pins nanoGPT to a commit and reroutes `get_batch` through
+> an embedded copy of `chess-tokeniser/nerf_batch.py` (`test_nerf_batch.py`
+> keeps the two byte-identical). Only ~10–25% of each batch is graded, so give
+> runs more iterations than a vanilla nanoGPT budget — e.g. add
+> `-e MAX_ITERS=6000` to the smoke command above — and never compare losses
+> against a checkpoint trained without the transform.
+
 The command prints a **job URL** (`https://huggingface.co/jobs/<you>/<id>`) —
 open it for live logs, or watch from the terminal:
 

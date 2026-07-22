@@ -11,9 +11,14 @@
 //   ctx = {
 //     fen:           current position (FEN string)
 //     moves:         SAN history of the game, e.g. ['e4', 'c5', 'Nf3']
-//     historyTokens: the same history as a flat token stream, including any
-//                    nerf tokens the computer emitted before its moves —
-//                    i.e. exactly what a production LM would have in context
+//     historyTokens: the same history as a BARE flat token stream — it never
+//                    contains nerf tokens, not even ones the computer itself
+//                    emitted earlier (training strips all past nerfs from
+//                    context; see chess-tokeniser/nerf_batch.py). A real LM
+//                    adapter builds its context as
+//                      <bos> <eloW> <eloB> ...historyTokens
+//                             [+ the nerf token matching `quality`, if set]
+//                             ...moveTokens
 //     moveTokens:    tokens emitted so far for the move being decoded,
 //                    e.g. [] then ['x'] then ['x', '=Q'] ...
 //     turn:          'w' | 'b'  — side the model is playing

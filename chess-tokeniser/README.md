@@ -65,15 +65,22 @@ outside it — ~0 on real data.
   bracket→id translation, Elo bucketing, and `<bos>/<eos>` game framing
 - `pack.py` — Stage 2 CLI: frames + maps + time-splits into `train.bin`/
   `val.bin`/`meta.pkl`
-- `test_tokeniser.py`, `test_pack.py` — unit tests (incl. a verbatim real game;
-  the frozen vocab is checked for full coverage and JS↔Python parity)
+- `nerf_batch.py` — bare-history batch transform used at training time: cuts
+  each sampled window at annotated moves so a nerf token is only ever in
+  context beside the move it labels, and loss-masks everything else
+  (`train_chess_hf.py` embeds a byte-identical copy and patches it into
+  nanoGPT's `get_batch`; see TRAINING.md "bare-history rule")
+- `test_tokeniser.py`, `test_pack.py`, `test_nerf_batch.py` — unit tests
+  (incl. a verbatim real game; the frozen vocab is checked for full coverage
+  and JS↔Python parity; the bare-history rows are pinned against hand-worked
+  examples and the embedded copy is checked byte-for-byte)
 - `gen_synthetic.py` — offline validation corpus generator
 
 ## Run
 
 ```bash
 pip install duckdb pyarrow numpy
-python test_tokeniser.py && python test_pack.py      # sanity check
+python test_tokeniser.py && python test_pack.py && python test_nerf_batch.py  # sanity check
 
 # --- Stage 1: tokenise (needs internet access to huggingface.co) ---
 # validation slice: ~200k games from one month (minutes)

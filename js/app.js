@@ -19,7 +19,9 @@ let targetMoves = new Map();  // square -> verbose moves landing there
 let annotations = new Map();  // ply index -> quality, for computer moves
 let lastResult = null;        // last pickComputerMove() result, for inspector
 let pendingPromotion = null;
-let tokenStream = [];         // the game as a flat token stream, nerf tokens included
+let tokenStream = [];         // the game as a BARE flat token stream — never
+                              // contains nerf tokens (the bare-history training
+                              // contract; see chess-tokeniser/nerf_batch.py)
 
 const board = createBoard($('board'), onSquareClick);
 
@@ -198,7 +200,9 @@ async function computerTurn() {
   try {
     const result = await pickComputerMove(model, ctx);
     game.move(result.san);
-    if (result.nerf) tokenStream.push(result.nerf.token);
+    // Deliberately NOT pushing result.nerf into the stream: history stays bare
+    // (the model is trained with past nerfs stripped). The quality lives on in
+    // `annotations` for the move list.
     tokenStream.push(...result.tokens);
     if (result.quality) annotations.set(game.history().length - 1, result.quality);
     lastResult = result;
