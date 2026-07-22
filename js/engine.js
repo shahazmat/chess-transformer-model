@@ -112,6 +112,7 @@ export async function pickComputerMove(model, ctx) {
   let quality = null;
   let nerf = null;       // the drawn nerf token and its probability, if any
   let nerfMass = 0;      // total nerf mass on the first, unconditioned step
+  let mate = null;       // { available, p } — P('#') gauge on the first step
   const steps = [];      // one entry per model call, for the inspector
 
   let prefix = [];
@@ -134,6 +135,16 @@ export async function pickComputerMove(model, ctx) {
         ? dist
         : maskedDistribution(out, [...legalNext, ...NERF_TOKENS], T);
       nerfMass = gauge.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? gauge.probs[i] : 0), 0);
+      // Mate gauge: '#' LEADS every mating sequence, so a legal mate exists
+      // exactly when '#' is a legal first token. If so, its masked probability
+      // is the chance the model announces mate right now; with no mate on the
+      // board we report its raw belief in '#' instead (miscalibration tell).
+      const mi = dist.tokens.indexOf('#');
+      const rawSharp = lookupFor(out)('#');
+      mate = {
+        available: mi !== -1,
+        p: mi !== -1 ? dist.probs[mi] : (Number.isFinite(rawSharp) && rawSharp > 0 ? rawSharp : 0),
+      };
     }
 
     const i = sampleIndex(dist.probs);
@@ -160,6 +171,7 @@ export async function pickComputerMove(model, ctx) {
         quality,          // null | 'inaccuracy' | 'mistake' | 'blunder'
         nerf,
         nerfMass,
+        mate,             // { available, p } — the P('#') gauge for the UI
         legalCount: ctx.legalMoves.length,
       };
     }

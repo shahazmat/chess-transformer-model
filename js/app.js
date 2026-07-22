@@ -129,7 +129,7 @@ function renderInspector() {
   const chain = r.steps.map((s) => `[${escapeHtml(s.token)}]`).join(' ');
   const lines = [];
   lines.push(`<p>Decoded <strong>${r.san}</strong> as <code>${chain}</code>${r.quality ? ` <em class="${r.quality}">— ${r.quality}</em>` : ''}</p>`);
-  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'}</p>`);
+  lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'} · P(#) ${pct(r.mate?.p ?? 0)}${r.mate?.available ? ' — <strong>mate available</strong>' : ''}</p>`);
   r.steps.forEach((step, n) => {
     const max = Math.max(...step.top.map((t) => t.p), 1e-9);
     lines.push(`<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}</p>`);

@@ -87,10 +87,17 @@ def load_model(args):
         meta_path = os.path.join(args.local, "meta.pkl")
     else:
         from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import EntryNotFoundError
 
         print(f"== downloading checkpoint from {args.repo}")
         ckpt_path = hf_hub_download(args.repo, "ckpt.pt")
-        meta_path = hf_hub_download(args.repo, "meta.pkl")
+        try:
+            meta_path = hf_hub_download(args.repo, "meta.pkl")
+        except EntryNotFoundError:
+            # Mid-run periodic pushes carry only ckpt.pt; meta.pkl lands with
+            # the final upload. The dataset repo holds the identical file.
+            print(f"== meta.pkl not in {args.repo} yet — using {args.meta_repo}")
+            meta_path = hf_hub_download(args.meta_repo, "meta.pkl", repo_type="dataset")
 
     with open(meta_path, "rb") as f:
         meta = pickle.load(f)
@@ -123,6 +130,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="shazmate/gpct-trial", help="HF model repo with ckpt.pt + meta.pkl")
     ap.add_argument("--local", default=None, help="local dir with ckpt.pt + meta.pkl (skips download)")
+    ap.add_argument("--meta-repo", default="shazmate/lichess-chess-tokens",
+                    help="dataset repo to fetch meta.pkl from when the model repo lacks it (mid-run pushes)")
     ap.add_argument("--port", type=int, default=8123)
     ap.add_argument("--model-elo", default="any",
                     help="Elo the model plays at: a number for its bucket, 'any' for <elo-any>")
