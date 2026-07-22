@@ -46,10 +46,18 @@
 import { TOKENS, TOKEN_INDEX, NERF_TOKENS, QUALITY_BY_TOKEN, VOCAB_SIZE, isNerfToken, sanToTokens } from './vocab.js';
 
 export const ENGINE_CONFIG = {
-  temperature: 1.0,        // p_i ^ (1/T) over each masked step; 1 = untouched
+  temperature: 0.7,        // p_i ^ (1/T) over each masked step; <1 sharpens
   allowNerfTokens: false,  // masked: the model plays only its clean branch (full
                            // strength). true = human-like mode — it may announce
                            // a nerf and play a deliberately degraded move.
+  topK: 5,                 // clean play samples only among the model's K best
+                           // legal moves (by full-sequence probability); a legal
+                           // mate is always kept. 0 = off (all legal moves).
+  forceMate: true,         // if a mate is legal, always play it. '#' leads every
+                           // mating sequence, so we force '#' on the first step
+                           // when it is available (the model still picks WHICH
+                           // mate). The model tags most mates as check, so a mere
+                           // probability boost isn't enough — this is a hard rule.
   thinkDelayMs: [350, 900],
 };
 
@@ -105,58 +113,100 @@ function topOf({ tokens, probs }, limit = 5) {
     .slice(0, limit);
 }
 
+// The model's probability of one whole move token sequence, decoded with
+// legal-move masking at each step (temperature 1 — a raw ranking used only to
+// pick the top-K legal moves). `predict` is memoized by the caller, so the many
+// single-token moves all share the one empty-prefix model call.
+async function scoreSeq(predict, tokens, allSeqs) {
+  let p = 1;
+  const prefix = [];
+  for (let depth = 0; depth < tokens.length; depth++) {
+    const cont = allSeqs.filter((s) => prefix.every((t, i) => s.tokens[i] === t));
+    const allowed = [...new Set(cont.map((s) => s.tokens[prefix.length]).filter((t) => t !== undefined))];
+    const dist = maskedDistribution(await predict(prefix, null), allowed, 1);
+    const idx = dist.tokens.indexOf(tokens[depth]);
+    if (idx === -1) return 0;
+    p *= dist.probs[idx];
+    prefix.push(tokens[depth]);
+  }
+  return p;
+}
+
 export async function pickComputerMove(model, ctx) {
   const T = ENGINE_CONFIG.temperature;
-  const seqs = ctx.legalMoves.map((san) => ({ san, tokens: sanToTokens(san) }));
+  const allSeqs = ctx.legalMoves.map((san) => ({ san, tokens: sanToTokens(san) }));
 
+  // One model call per (quality, prefix), memoized and shared between the
+  // top-K scoring pass and the decode loop below.
+  const cache = new Map();
+  const predict = async (prefix, quality) => {
+    const key = `${quality ?? ''}|${prefix.join(',')}`;
+    if (!cache.has(key)) {
+      cache.set(key, await model.predict({ ...ctx, quality, moveTokens: [...prefix], vocab: TOKENS }));
+    }
+    return cache.get(key);
+  };
+
+  // ---- gauges over the FULL legal set, unconditioned first step ----
+  const out0 = await predict([], null);
+  const firstAll = [...new Set(allSeqs.map((s) => s.tokens[0]))];
+  const gaugeDist = maskedDistribution(out0, [...firstAll, ...NERF_TOKENS], T);
+  const nerfMass = gaugeDist.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? gaugeDist.probs[i] : 0), 0);
+  const gi = gaugeDist.tokens.indexOf('#');
+  const rawSharp = lookupFor(out0)('#');
+  // '#' leads every mating sequence, so a legal mate exists iff '#' is a legal
+  // first token. p = the model's (unboosted) belief it announces mate now, or
+  // its raw '#' mass when no mate is on the board (a miscalibration tell).
+  const mate = {
+    available: firstAll.includes('#'),
+    p: gi !== -1 ? gaugeDist.probs[gi] : (Number.isFinite(rawSharp) && rawSharp > 0 ? rawSharp : 0),
+  };
+
+  // ---- restrict clean play to the model's top-K legal moves (+ any mate) ----
+  let topMoves = null;
+  let baseCandidates = allSeqs;
+  if (ENGINE_CONFIG.topK > 0 && allSeqs.length > ENGINE_CONFIG.topK) {
+    const scored = [];
+    for (const s of allSeqs) scored.push({ s, p: await scoreSeq(predict, s.tokens, allSeqs) });
+    scored.sort((a, b) => b.p - a.p);
+    const keep = new Set(scored.slice(0, ENGINE_CONFIG.topK).map((x) => x.s));
+    for (const x of scored) if (x.s.san.includes('#')) keep.add(x.s); // never drop a mate
+    baseCandidates = allSeqs.filter((s) => keep.has(s));
+    topMoves = scored.filter((x) => keep.has(x.s)).map((x) => ({ san: x.s.san, p: x.p }));
+  }
+
+  // ---- decode token-by-token over the (restricted) candidate moves ----
   let quality = null;
-  let nerf = null;       // the drawn nerf token and its probability, if any
-  let nerfMass = 0;      // total nerf mass on the first, unconditioned step
-  let mate = null;       // { available, p } — P('#') gauge on the first step
-  const steps = [];      // one entry per model call, for the inspector
-
+  let nerf = null;
+  const steps = [];
   let prefix = [];
-  let candidates = seqs;
+  let candidates = baseCandidates;
 
   for (let guard = 0; guard < 8; guard++) {
     const first = prefix.length === 0;
-    const legalNext = [...new Set(candidates.map((s) => s.tokens[prefix.length]))];
+    const legalNext = [...new Set(candidates.map((s) => s.tokens[prefix.length]).filter((t) => t !== undefined))];
     const allowed = first && quality === null && ENGINE_CONFIG.allowNerfTokens
       ? [...legalNext, ...NERF_TOKENS]
       : legalNext;
 
-    const out = await model.predict({ ...ctx, quality, moveTokens: [...prefix], vocab: TOKENS });
-    const dist = maskedDistribution(out, allowed, T);
-    if (first && quality === null) {
-      // nerfMass is always gauged over legal moves + nerf tokens, so with
-      // allowNerfTokens=false it reports the HYPOTHETICAL chance the model
-      // would have opened this move with a nerf — sampling stays masked.
-      const gauge = ENGINE_CONFIG.allowNerfTokens
-        ? dist
-        : maskedDistribution(out, [...legalNext, ...NERF_TOKENS], T);
-      nerfMass = gauge.tokens.reduce((a, t, i) => a + (isNerfToken(t) ? gauge.probs[i] : 0), 0);
-      // Mate gauge: '#' LEADS every mating sequence, so a legal mate exists
-      // exactly when '#' is a legal first token. If so, its masked probability
-      // is the chance the model announces mate right now; with no mate on the
-      // board we report its raw belief in '#' instead (miscalibration tell).
-      const mi = dist.tokens.indexOf('#');
-      const rawSharp = lookupFor(out)('#');
-      mate = {
-        available: mi !== -1,
-        p: mi !== -1 ? dist.probs[mi] : (Number.isFinite(rawSharp) && rawSharp > 0 ? rawSharp : 0),
-      };
-    }
+    const dist = maskedDistribution(await predict(prefix, quality), allowed, T);
 
-    const i = sampleIndex(dist.probs);
+    // Force mate: '#' is a legal first token exactly when a mate is playable.
+    // If so, take it deterministically (the model tags most mates as check, so
+    // its '#' mass is tiny — a boost isn't enough). Later steps then pick which
+    // mating move. p is left at the model's honest belief for the inspector.
+    const mateIdx = first && quality === null && ENGINE_CONFIG.forceMate ? dist.tokens.indexOf('#') : -1;
+    const i = mateIdx !== -1 ? mateIdx : sampleIndex(dist.probs);
     const token = dist.tokens[i];
-    steps.push({ token, p: dist.probs[i], top: topOf(dist) });
+    steps.push({ token, p: dist.probs[i], top: topOf(dist), forced: mateIdx !== -1 });
 
     if (isNerfToken(token)) {
-      // Nerfed: re-decode from scratch, conditioned on the drawn quality.
+      // Nerfed: re-decode from scratch, conditioned on the drawn quality. Drop
+      // the top-K restriction — a deliberate blunder wants the model's bad moves.
       quality = QUALITY_BY_TOKEN[token];
       nerf = { token, p: dist.probs[i] };
       prefix = [];
-      candidates = seqs;
+      candidates = allSeqs;
       continue;
     }
 
@@ -172,6 +222,8 @@ export async function pickComputerMove(model, ctx) {
         nerf,
         nerfMass,
         mate,             // { available, p } — the P('#') gauge for the UI
+        topMoves,         // [{ san, p }] the restricted pool, or null when off
+        sampledSan: complete.san,
         legalCount: ctx.legalMoves.length,
       };
     }

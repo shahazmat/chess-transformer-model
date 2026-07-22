@@ -63,6 +63,11 @@
       <section id="play" hidden>
         <div id="status" class="status"></div>
         <div id="moves" aria-label="move list"></div>
+        <div class="ply-nav">
+          <button id="ply-back" type="button" aria-label="previous move">◀</button>
+          <span id="ply-pos">—</span>
+          <button id="ply-fwd" type="button" aria-label="next move" disabled>▶</button>
+        </div>
         <details id="inspector" open>
           <summary>Model output</summary>
           <div id="inspector-body"></div>

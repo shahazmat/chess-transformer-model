@@ -201,6 +201,25 @@ button.primary:hover { filter: brightness(1.07); }
 #moves:empty { display: none; }
 #moves .num { color: var(--muted); }
 #moves .mv em { font-style: normal; font-weight: 700; }
+#moves .mv[data-ply] { cursor: pointer; border-radius: 4px; padding: 0 3px; }
+#moves .mv[data-ply]:hover { background: var(--bg); }
+#moves .mv.viewing { background: var(--last-move); }
+
+/* move review nav */
+.ply-nav { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.ply-nav button {
+  width: 38px;
+  padding: 3px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.ply-nav button:hover:enabled { background: var(--bg); }
+.ply-nav button:disabled { opacity: 0.35; cursor: default; }
+#ply-pos { flex: 1; text-align: center; font-size: 12.5px; color: var(--muted); }
 
 em.inaccuracy { color: var(--inaccuracy); font-style: normal; }
 em.mistake { color: var(--mistake); font-style: normal; }
@@ -214,6 +233,18 @@ em.blunder { color: var(--blunder); font-style: normal; }
 #inspector-body code { background: #efe8d8; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 .step-label { margin-top: 8px !important; color: var(--muted); font-size: 12px; }
 .muted { color: var(--muted); }
+
+.cands { display: flex; flex-wrap: wrap; gap: 5px; margin: 2px 0 4px; }
+.cand {
+  font: 12px ui-monospace, "Cascadia Mono", Consolas, monospace;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+.cand.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.cand .cp { color: var(--muted); }
+.cand.on .cp { color: var(--accent-ink); opacity: 0.8; }
 
 .bars { display: flex; flex-direction: column; gap: 3px; }
 .bar-row {

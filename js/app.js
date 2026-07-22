@@ -27,7 +27,9 @@ let selected = null;
 let targets = new Map();      // square -> 'move' | 'capture'
 let targetMoves = new Map();  // square -> verbose moves landing there
 let annotations = new Map();  // ply index -> quality, for computer moves
-let lastResult = null;        // last pickComputerMove() result, for inspector
+let moveRecords = [];         // one record per ply: computer plies keep the full
+                              // pickComputerMove() result; human plies { san, human }
+let viewPly = null;           // null = live; else the number of plies shown (review mode)
 let pendingPromotion = null;
 let tokenStream = [];         // the game as a BARE flat token stream — never
                               // contains nerf tokens (the bare-history training
@@ -37,37 +39,53 @@ const board = createBoard($('board'), onSquareClick);
 
 // ---------------------------------------------------------------- rendering
 
-function checkSquare() {
-  if (!game.inCheck()) return null;
-  for (const row of game.board()) {
+function checkSquare(g = game) {
+  if (!g.inCheck()) return null;
+  for (const row of g.board()) {
     for (const cell of row) {
-      if (cell && cell.type === 'k' && cell.color === game.turn()) return cell.square;
+      if (cell && cell.type === 'k' && cell.color === g.turn()) return cell.square;
     }
   }
   return null;
 }
 
-function lastMove() {
-  const history = game.history({ verbose: true });
+function lastMove(g = game) {
+  const history = g.history({ verbose: true });
   const m = history[history.length - 1];
   return m ? { from: m.from, to: m.to } : null;
 }
 
+// The position on display: the live game, or a replayed prefix when reviewing.
+function viewedGame() {
+  if (viewPly === null) return game;
+  const g = new Chess();
+  const hist = game.history();
+  for (let i = 0; i < viewPly; i++) g.move(hist[i]);
+  return g;
+}
+
 function render() {
+  const vg = viewedGame();
   board.render({
-    board: game.board(),
+    board: vg.board(),
     orientation: humanColor,
     selected,
     targets,
-    lastMove: lastMove(),
-    checkSquare: checkSquare(),
+    lastMove: lastMove(vg),
+    checkSquare: checkSquare(vg),
   });
   renderStatus();
   renderMoves();
+  renderNav();
 }
 
 function renderStatus() {
   const el = $('status');
+  if (viewPly !== null) {
+    el.textContent = `Reviewing move ${viewPly} of ${game.history().length} — ▶ returns to live`;
+    el.className = 'status thinking';
+    return;
+  }
   if (phase === 'over') {
     el.textContent = gameOverText();
     el.className = 'status over';
@@ -113,26 +131,46 @@ function moveCell(history, ply) {
   if (san === undefined) return '<span class="mv"></span>';
   const quality = annotations.get(ply);
   const glyph = quality ? `<em class="${quality}" title="${quality} token">${GLYPH_BY_QUALITY[quality]}</em>` : '';
-  return `<span class="mv">${san}${glyph}</span>`;
+  const viewing = viewPly !== null && viewPly - 1 === ply ? ' viewing' : '';
+  return `<span class="mv${viewing}" data-ply="${ply}" title="review this move">${san}${glyph}</span>`;
 }
 
 const escapeHtml = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 
 function renderInspector() {
   const el = $('inspector-body');
-  if (!lastResult) {
-    el.innerHTML = '<p class="muted">Plays after the computer’s first move.</p>';
+  const shown = viewPly === null ? game.history().length : viewPly;
+  const r = shown > 0 ? moveRecords[shown - 1] : null;
+  if (!r) {
+    el.innerHTML = shown === 0 && game.history().length > 0
+      ? '<p class="muted">Start position — no move yet.</p>'
+      : '<p class="muted">Plays after the computer’s first move.</p>';
     return;
   }
-  const r = lastResult;
+  if (r.human) {
+    el.innerHTML = `<p><strong>${escapeHtml(r.san)}</strong> — your move; the model is not queried for it.</p>`;
+    return;
+  }
+  if (r.fallback) {
+    el.innerHTML = `<p><strong>${escapeHtml(r.san)}</strong> — the model call failed; a uniform-random legal move was played.</p>`;
+    return;
+  }
   const pct = (p) => `${(p * 100).toFixed(1)}%`;
   const chain = r.steps.map((s) => `[${escapeHtml(s.token)}]`).join(' ');
   const lines = [];
   lines.push(`<p>Decoded <strong>${r.san}</strong> as <code>${chain}</code>${r.quality ? ` <em class="${r.quality}">— ${r.quality}</em>` : ''}</p>`);
   lines.push(`<p class="muted">${r.legalCount} legal moves · ${VOCAB_SIZE.toLocaleString()} tokens in vocab · nerf mass ${pct(r.nerfMass)}${ENGINE_CONFIG.allowNerfTokens ? '' : ' (masked)'} · P(#) ${pct(r.mate?.p ?? 0)}${r.mate?.available ? ' — <strong>mate available</strong>' : ''}</p>`);
+  if (r.topMoves && r.topMoves.length) {
+    const cands = r.topMoves
+      .map((m) => `<span class="cand${m.san === r.sampledSan ? ' on' : ''}">${escapeHtml(m.san)} <span class="cp">${pct(m.p)}</span></span>`)
+      .join('');
+    lines.push(`<p class="muted">chose among the model’s top ${r.topMoves.length} legal moves:</p><div class="cands">${cands}</div>`);
+  }
   r.steps.forEach((step, n) => {
     const max = Math.max(...step.top.map((t) => t.p), 1e-9);
-    lines.push(`<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}</p>`);
+    lines.push(step.forced
+      ? `<p class="step-label">step ${n + 1} — <strong>#</strong> forced (mate available; model gave it ${pct(step.p)})</p>`
+      : `<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}</p>`);
     lines.push('<div class="bars">');
     for (const t of step.top) {
       lines.push(
@@ -150,6 +188,7 @@ function renderInspector() {
 // ------------------------------------------------------------- interaction
 
 function onSquareClick(square) {
+  if (viewPly !== null) return; // reviewing: board is read-only until back at live
   if (phase !== 'playing' || busy || game.turn() !== humanColor || pendingPromotion) return;
 
   if (selected && targetMoves.has(square)) {
@@ -184,9 +223,51 @@ function clearSelection() {
   targetMoves = new Map();
 }
 
+// ------------------------------------------------------------- move review
+
+function renderNav() {
+  const total = game.history().length;
+  const cur = viewPly === null ? total : viewPly;
+  $('ply-pos').textContent = viewPly === null ? (total ? 'live' : '—') : `${cur} / ${total}`;
+  $('ply-back').disabled = cur === 0;
+  $('ply-fwd').disabled = viewPly === null;
+}
+
+// ply = number of plies to show; at (or past) the live edge we return to live.
+function setView(ply) {
+  const total = game.history().length;
+  viewPly = ply === null || ply >= total ? null : Math.max(0, ply);
+  clearSelection();
+  render();
+  renderInspector();
+}
+
+function stepView(delta) {
+  const total = game.history().length;
+  const cur = viewPly === null ? total : viewPly;
+  setView(cur + delta);
+}
+
+$('ply-back').addEventListener('click', () => stepView(-1));
+$('ply-fwd').addEventListener('click', () => stepView(1));
+
+$('moves').addEventListener('click', (e) => {
+  const cell = e.target.closest('.mv[data-ply]');
+  if (cell) setView(parseInt(cell.dataset.ply, 10) + 1);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (phase === 'setup' || pendingPromotion) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepView(-1); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); stepView(1); }
+});
+
 function playHumanMove(move) {
   const played = game.move(move);
   tokenStream.push(...sanToTokens(played.san));
+  moveRecords.push({ san: played.san, human: true });
   clearSelection();
   render();
   if (game.isGameOver()) return endGame();
@@ -215,12 +296,13 @@ async function computerTurn() {
     // `annotations` for the move list.
     tokenStream.push(...result.tokens);
     if (result.quality) annotations.set(game.history().length - 1, result.quality);
-    lastResult = result;
+    moveRecords.push(result);
   } catch (err) {
     console.error('model failed, playing a uniform-random legal move', err);
     const legal = game.moves();
     const played = game.move(legal[Math.floor(Math.random() * legal.length)]);
     tokenStream.push(...sanToTokens(played.san));
+    moveRecords.push({ san: played.san, fallback: true });
   }
   busy = false;
   renderInspector();
@@ -296,7 +378,8 @@ $('start').addEventListener('click', () => {
 function startGame() {
   game = new Chess();
   annotations = new Map();
-  lastResult = null;
+  moveRecords = [];
+  viewPly = null;
   tokenStream = [];
   clearSelection();
   phase = 'playing';
@@ -321,7 +404,8 @@ $('new-game').addEventListener('click', () => {
   phase = 'setup';
   game = new Chess();
   annotations = new Map();
-  lastResult = null;
+  moveRecords = [];
+  viewPly = null;
   tokenStream = [];
   clearSelection();
   busy = false;
@@ -362,6 +446,8 @@ window.chessGpt = {
   loadFen(fen) {
     game.load(fen);
     annotations = new Map();
+    moveRecords = [];
+    viewPly = null;
     tokenStream = [];
     clearSelection();
     phase = 'playing';

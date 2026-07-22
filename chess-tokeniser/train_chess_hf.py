@@ -343,8 +343,8 @@ if RESUME:
 cfg = dict(
     smoke=dict(n_layer=4, n_head=4, n_embd=128, block_size=512, batch_size=32,
                max_iters=2000, lr_decay_iters=2000, eval_interval=250, warmup_iters=100),
-    full=dict(n_layer=8, n_head=8, n_embd=512, block_size=1024, batch_size=64,
-              max_iters=100_000, lr_decay_iters=100_000, eval_interval=1000, warmup_iters=1000),
+    full=dict(n_layer=16, n_head=8, n_embd=512, block_size=1024, batch_size=64,
+              max_iters=300_000, lr_decay_iters=100_000, eval_interval=1000, warmup_iters=1000),
 )[PROFILE]
 if "MAX_ITERS" in os.environ:
     cfg["max_iters"] = cfg["lr_decay_iters"] = int(os.environ["MAX_ITERS"])
