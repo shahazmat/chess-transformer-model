@@ -262,11 +262,15 @@ em.blunder { color: var(--blunder); font-style: normal; }
 .bars { display: flex; flex-direction: column; gap: 3px; }
 .bar-row {
   display: grid;
-  grid-template-columns: 4.6em 1fr 3.4em;
+  grid-template-columns: 4.6em 1fr auto;
   gap: 8px;
   align-items: center;
   font: 12.5px ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
+.bar-row.cut .bar span { opacity: 0.15; }
+.bar-row.cut .tok { opacity: 0.55; }
+.bar-row .sp { color: var(--accent); font-size: 11.5px; }
+.bar-row.cut .sp { color: var(--muted); }
 .bar-row .bar { height: 9px; background: #ece5d4; border-radius: 4px; overflow: hidden; }
 .bar-row .bar span { display: block; height: 100%; background: var(--accent); border-radius: 4px; opacity: 0.45; }
 .bar-row.sampled .bar span { opacity: 1; }
@@ -274,6 +278,36 @@ em.blunder { color: var(--blunder); font-style: normal; }
 .bar-row.special .bar span { background: var(--inaccuracy); }
 .bar-row .pct { text-align: right; color: var(--muted); }
 .bar-row .tok { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* engine settings panel */
+#settings summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+#settings .field { margin: 12px 0 0; }
+#settings input[type="range"] { padding: 0; }
+.stage-row { display: grid; grid-template-columns: 4.5em 1fr; gap: 8px; align-items: center; }
+.checks { display: flex; flex-direction: column; gap: 4px; }
+.checks .check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 400;
+  font-size: 13.5px;
+  margin: 0;
+  cursor: pointer;
+}
+.checks input[type="checkbox"] { width: auto; margin: 0; }
+#set-reset {
+  width: 100%;
+  margin-top: 14px;
+  padding: 7px 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+#set-reset:hover { background: var(--bg); }
+.set-note { font-size: 12px; margin: 8px 0 0; }
 
 footer { max-width: 960px; margin: 26px auto 0; color: var(--muted); font-size: 13px; }
 footer code { background: #efe8d8; padding: 1px 5px; border-radius: 4px; }

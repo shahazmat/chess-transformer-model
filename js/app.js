@@ -5,6 +5,7 @@ import { createMockModel } from './mock-model.js';
 import { detectRemoteModel } from './remote-model.js';
 import { pickComputerMove, ENGINE_CONFIG } from './engine.js';
 import { VOCAB_SIZE, GLYPH_BY_QUALITY, sanToTokens } from './vocab.js';
+import './settings.js'; // the sidebar engine-settings panel (self-wiring)
 
 const $ = (id) => document.getElementById(id);
 
@@ -182,16 +183,22 @@ function renderInspector() {
   }
   r.steps.forEach((step, n) => {
     const max = Math.max(...step.top.map((t) => t.p), 1e-9);
+    const rawNote = step.rawP !== undefined && Math.abs(step.rawP - step.p) > 0.0005
+      ? ` <span class="muted">(raw ${pct(step.rawP)})</span>` : '';
     lines.push(step.forced
-      ? `<p class="step-label">step ${n + 1} — <strong>#</strong> forced (mate available; model gave it ${pct(step.p)})</p>`
-      : `<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}</p>`);
+      ? `<p class="step-label">step ${n + 1} — <strong>#</strong> forced (mate available; model gave it ${pct(step.rawP ?? step.p)})</p>`
+      : `<p class="step-label">step ${n + 1} — sampled <strong>${escapeHtml(step.token)}</strong> at ${pct(step.p)}${rawNote}</p>`);
     lines.push('<div class="bars">');
     for (const t of step.top) {
+      // bars rank and size by the model's RAW weight; the arrow shows what
+      // temperature + top-p + the floor turned it into ("cut" = trimmed out)
+      const shaped = t.sp === undefined || Math.abs(t.sp - t.p) <= 0.0005 ? ''
+        : t.sp > 0 ? ` <span class="sp">→ ${pct(t.sp)}</span>` : ' <span class="sp">→ cut</span>';
       lines.push(
-        `<div class="bar-row${t.special ? ' special' : ''}${t.token === step.token ? ' sampled' : ''}">` +
+        `<div class="bar-row${t.special ? ' special' : ''}${t.token === step.token ? ' sampled' : ''}${t.sp === 0 ? ' cut' : ''}">` +
         `<span class="tok">${escapeHtml(t.token)}</span>` +
         `<span class="bar"><span style="width:${Math.max(1.5, (t.p / max) * 100)}%"></span></span>` +
-        `<span class="pct">${pct(t.p)}</span></div>`,
+        `<span class="pct">${pct(t.p)}${shaped}</span></div>`,
       );
     }
     lines.push('</div>');

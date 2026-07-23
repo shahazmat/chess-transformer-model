@@ -57,11 +57,37 @@ import {
 } from './vocab.js';
 
 export const ENGINE_CONFIG = {
-  temperature: 0.7,        // p_i ^ (1/T) over each masked step; <1 sharpens
-  allowNerfTokens: false,  // masked: the model plays only its clean branch (full
-                           // strength). true = human-like mode — it may announce
-                           // a nerf and play a deliberately degraded move.
-  topK: 5,                 // clean play samples only among the model's K best
+  temperature: 1,          // p_i ^ (1/T) over each masked step; <1 sharpens.
+                           // This is the OPENING temperature — the stages below
+                           // step it down as the game goes on.
+  tempMidFrom: 15,         // fullmove the middlegame temperature kicks in (0 = never)
+  tempMid: 0.7,
+  tempEndFrom: 30,         // fullmove the endgame temperature kicks in (0 = never)
+  tempEnd: 0.4,
+  allowNerfTokens: ['<inaccuracy>'],
+                           // false = masked: the model plays only its clean branch
+                           // (full strength). true = human-like mode — it may announce
+                           // a nerf and play a deliberately degraded move. An array
+                           // of nerf tokens allows only those to be sampled.
+  forceQuality: null,      // 'inaccuracy' | 'mistake' | 'blunder' | null — force
+                           // EVERY computer move down that nerf branch: the token
+                           // is taken as drawn (p=1) on the first step, the move
+                           // decodes conditioned on it, and the UI annotates it.
+                           // Overrides allowNerfTokens (no second nerf is drawn).
+  minP: 0.1,               // decode-step floor: tokens under this masked
+                           // probability are dropped before sampling (0 = off).
+                           // If nothing clears the bar, the best token survives.
+  minPExempt: ['<inaccuracy>'],
+                           // tokens the minP floor never drops — they stay
+                           // sampleable at their (renormalized) model weight.
+  minPFromMove: 10,        // apply the minP floor only from this fullmove number
+                           // onwards (1 = the whole game); earlier moves sample
+                           // the unfloored distribution.
+  topP: 0.6,               // nucleus sampling per decode step: keep the smallest
+                           // set of highest-probability tokens whose cumulative
+                           // mass reaches this, renormalize, sample (1 = off).
+                           // minPExempt tokens always survive at their weight.
+  topK: 0,                 // clean play samples only among the model's K best
                            // legal moves (by full-sequence probability); a legal
                            // mate is always kept. 0 = off (all legal moves).
   forceMate: true,         // if a mate is legal, always play it. '#' leads every
@@ -117,6 +143,61 @@ function maskedDistribution(output, allowed, temperature) {
   return { tokens: allowed, probs: probs.map((v) => v / sum) };
 }
 
+// Sampling temperature for a given fullmove: the opening value, stepping down
+// at the configured middlegame / endgame move numbers (0 disables a stage).
+function temperatureForMove(moveNumber) {
+  const c = ENGINE_CONFIG;
+  if (c.tempEndFrom > 0 && moveNumber >= c.tempEndFrom) return c.tempEnd;
+  if (c.tempMidFrom > 0 && moveNumber >= c.tempMidFrom) return c.tempMid;
+  return c.temperature;
+}
+
+// Nucleus (top-p) trim for decode steps: walk tokens from most to least
+// probable, keep them until their cumulative mass reaches ENGINE_CONFIG.topP,
+// zero the rest, renormalize. minPExempt tokens are never trimmed — a
+// sampleable nerf token's mass is tiny and would otherwise never make the
+// nucleus — and don't count toward the cumulative mass.
+function applyTopP(dist) {
+  const topP = ENGINE_CONFIG.topP;
+  if (!topP || topP >= 1) return dist;
+  const exempt = ENGINE_CONFIG.minPExempt ?? [];
+  const order = dist.probs.map((_, i) => i).sort((a, b) => dist.probs[b] - dist.probs[a]);
+  const keep = new Set();
+  let cum = 0;
+  for (const i of order) {
+    if (dist.probs[i] <= 0) break;
+    if (exempt.includes(dist.tokens[i])) continue;
+    keep.add(i);
+    cum += dist.probs[i];
+    if (cum >= topP) break;
+  }
+  dist.tokens.forEach((t, i) => { if (exempt.includes(t) && dist.probs[i] > 0) keep.add(i); });
+  const probs = dist.probs.map((p, i) => (keep.has(i) ? p : 0));
+  const sum = probs.reduce((a, b) => a + b, 0);
+  return sum > 0 ? { tokens: dist.tokens, probs: probs.map((v) => v / sum) } : dist;
+}
+
+// The minP floor for decode steps: zero tokens below ENGINE_CONFIG.minP
+// (measured on the masked, renormalized distribution), then renormalize the
+// survivors. minPExempt tokens are never dropped. If no non-exempt token
+// clears the bar, the single best one survives so a move always exists.
+function applyMinP(dist, moveNumber) {
+  const minP = ENGINE_CONFIG.minP;
+  if (!minP || moveNumber < (ENGINE_CONFIG.minPFromMove ?? 1)) return dist;
+  const exempt = ENGINE_CONFIG.minPExempt ?? [];
+  const keep = dist.probs.map((p, i) => p >= minP || exempt.includes(dist.tokens[i]));
+  if (!keep.some((k, i) => k && !exempt.includes(dist.tokens[i]))) {
+    let best = -1;
+    dist.probs.forEach((p, i) => {
+      if (!exempt.includes(dist.tokens[i]) && (best === -1 || p > dist.probs[best])) best = i;
+    });
+    if (best !== -1) keep[best] = true;
+  }
+  const probs = dist.probs.map((p, i) => (keep[i] ? p : 0));
+  const sum = probs.reduce((a, b) => a + b, 0);
+  return sum > 0 ? { tokens: dist.tokens, probs: probs.map((v) => v / sum) } : dist;
+}
+
 function sampleIndex(probs) {
   let r = Math.random();
   for (let i = 0; i < probs.length; i++) {
@@ -125,14 +206,6 @@ function sampleIndex(probs) {
   }
   for (let i = probs.length - 1; i >= 0; i--) if (probs[i] > 0) return i;
   return 0;
-}
-
-// Top-of-distribution view for the UI inspector.
-function topOf({ tokens, probs }, limit = 5) {
-  return tokens
-    .map((t, i) => ({ token: t, p: probs[i], special: isNerfToken(t) || isEndToken(t) }))
-    .sort((a, b) => b.p - a.p)
-    .slice(0, limit);
 }
 
 // The model's probability of one whole move token sequence, decoded with
@@ -155,7 +228,8 @@ async function scoreSeq(predict, tokens, allSeqs) {
 }
 
 export async function pickComputerMove(model, ctx) {
-  const T = ENGINE_CONFIG.temperature;
+  const moveNumber = Math.floor(ctx.moves.length / 2) + 1;
+  const T = temperatureForMove(moveNumber);
   const allSeqs = ctx.legalMoves.map((san) => ({ san, tokens: sanToTokens(san) }));
 
   // One model call per (quality, prefix), memoized and shared between the
@@ -198,10 +272,17 @@ export async function pickComputerMove(model, ctx) {
   const pOppResign = gaugeP(oppResignToken);
   const pDraw = gaugeP(DRAW_TOKEN);
 
+  // forceQuality: pretend that nerf token was drawn on the first step — same
+  // branch as a sampled nerf (conditioned decode over ALL legal moves, no
+  // top-K), but deterministic, so every computer move carries the annotation.
+  const forcedTok = ENGINE_CONFIG.forceQuality
+    ? NERF_TOKENS.find((t) => QUALITY_BY_TOKEN[t] === ENGINE_CONFIG.forceQuality)
+    : undefined;
+
   // ---- restrict clean play to the model's top-K legal moves (+ any mate) ----
   let topMoves = null;
   let baseCandidates = allSeqs;
-  if (ENGINE_CONFIG.topK > 0 && allSeqs.length > ENGINE_CONFIG.topK) {
+  if (!forcedTok && ENGINE_CONFIG.topK > 0 && allSeqs.length > ENGINE_CONFIG.topK) {
     const scored = [];
     for (const s of allSeqs) scored.push({ s, p: await scoreSeq(predict, s.tokens, allSeqs) });
     scored.sort((a, b) => b.p - a.p);
@@ -218,6 +299,12 @@ export async function pickComputerMove(model, ctx) {
   let prefix = [];
   let candidates = baseCandidates;
 
+  if (forcedTok) {
+    quality = ENGINE_CONFIG.forceQuality;
+    nerf = { token: forcedTok, p: 1 };
+    steps.push({ token: forcedTok, p: 1, top: [{ token: forcedTok, p: 1, sp: 1, special: true }] });
+  }
+
   for (let guard = 0; guard < 8; guard++) {
     const first = prefix.length === 0;
     const legalNext = [...new Set(candidates.map((s) => s.tokens[prefix.length]).filter((t) => t !== undefined))];
@@ -230,22 +317,34 @@ export async function pickComputerMove(model, ctx) {
     const allowed = first && quality === null
       ? [
           ...legalNext,
-          ...(ENGINE_CONFIG.allowNerfTokens ? NERF_TOKENS : []),
+          ...(ENGINE_CONFIG.allowNerfTokens === true ? NERF_TOKENS
+            : Array.isArray(ENGINE_CONFIG.allowNerfTokens) ? ENGINE_CONFIG.allowNerfTokens : []),
           ...(ENGINE_CONFIG.allowResign ? [ownResignToken] : []),
           ...(ENGINE_CONFIG.allowDrawOffer && !ctx.excludeDraw ? [DRAW_TOKEN] : []),
         ]
       : legalNext;
 
-    const dist = maskedDistribution(await predict(prefix, quality), allowed, T);
+    const out = await predict(prefix, quality);
+    // The model's honest weights over the allowed tokens (no temperature, no
+    // top-p, no floor) — recorded per step so the UI can show raw vs sampled.
+    const rawDist = maskedDistribution(out, allowed, 1);
+    const dist = applyMinP(applyTopP(maskedDistribution(out, allowed, T)), moveNumber);
 
     // Force mate: '#' is a legal first token exactly when a mate is playable.
     // If so, take it deterministically (the model tags most mates as check, so
     // its '#' mass is tiny — a boost isn't enough). Later steps then pick which
     // mating move. p is left at the model's honest belief for the inspector.
-    const mateIdx = first && quality === null && ENGINE_CONFIG.forceMate ? dist.tokens.indexOf('#') : -1;
+    const mateIdx = first && (quality === null || forcedTok) && ENGINE_CONFIG.forceMate ? dist.tokens.indexOf('#') : -1;
     const i = mateIdx !== -1 ? mateIdx : sampleIndex(dist.probs);
     const token = dist.tokens[i];
-    steps.push({ token, p: dist.probs[i], top: topOf(dist), forced: mateIdx !== -1 });
+    // top-of-step view, ranked by RAW weight: p = the model's honest
+    // probability, sp = what it became after temperature + top-p + the floor
+    // (0 = trimmed out of the sampling pool).
+    const top = dist.tokens
+      .map((t, k) => ({ token: t, p: rawDist.probs[k], sp: dist.probs[k], special: isNerfToken(t) || isEndToken(t) }))
+      .sort((a, b) => b.p - a.p)
+      .slice(0, 5);
+    steps.push({ token, p: dist.probs[i], rawP: rawDist.probs[i], top, forced: mateIdx !== -1 });
 
     if (isEndToken(token)) {
       // Game-end action sampled instead of a move — hand control to app.js:

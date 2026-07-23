@@ -86,6 +86,72 @@
           <button id="copy-pgn" type="button">Copy PGN</button>
         </div>
       </section>
+
+      <section id="settings-panel">
+        <details id="settings">
+          <summary>Engine settings</summary>
+          <div class="field">
+            <label for="set-temperature">Temperature — opening <span class="opt" id="set-temperature-val"></span></label>
+            <input id="set-temperature" type="range" min="0.05" max="2" step="0.05">
+          </div>
+          <div class="field">
+            <label for="set-temp-mid">Middlegame <span class="opt">from move (0 = never) · temp <span id="set-temp-mid-val"></span></span></label>
+            <div class="stage-row">
+              <input id="set-temp-mid-from" type="number" min="0" max="200" step="1">
+              <input id="set-temp-mid" type="range" min="0.05" max="2" step="0.05">
+            </div>
+          </div>
+          <div class="field">
+            <label for="set-temp-end">Endgame <span class="opt">from move (0 = never) · temp <span id="set-temp-end-val"></span></span></label>
+            <div class="stage-row">
+              <input id="set-temp-end-from" type="number" min="0" max="200" step="1">
+              <input id="set-temp-end" type="range" min="0.05" max="2" step="0.05">
+            </div>
+          </div>
+          <div class="field">
+            <label for="set-topp">Top-p (nucleus) <span class="opt">1 = off · <span id="set-topp-val"></span></span></label>
+            <input id="set-topp" type="range" min="0.05" max="1" step="0.05">
+          </div>
+          <div class="field">
+            <label for="set-topk">Top-K moves <span class="opt">0 = all legal moves</span></label>
+            <input id="set-topk" type="number" min="0" max="50" step="1">
+          </div>
+          <div class="field">
+            <label for="set-minp">Sampling floor (min-p) <span class="opt" id="set-minp-val"></span></label>
+            <input id="set-minp" type="range" min="0" max="0.5" step="0.01">
+          </div>
+          <div class="field">
+            <label for="set-minp-from">Floor from move</label>
+            <input id="set-minp-from" type="number" min="1" max="200" step="1">
+          </div>
+          <div class="field">
+            <label>Sampleable nerf tokens <span class="opt">also exempt from the floor</span></label>
+            <div class="checks">
+              <label class="check"><input type="checkbox" id="set-nerf-inaccuracy"> <em class="inaccuracy">?!</em> inaccuracy</label>
+              <label class="check"><input type="checkbox" id="set-nerf-mistake"> <em class="mistake">?</em> mistake</label>
+              <label class="check"><input type="checkbox" id="set-nerf-blunder"> <em class="blunder">??</em> blunder</label>
+            </div>
+          </div>
+          <div class="field">
+            <label for="set-force-quality">Force quality every move</label>
+            <select id="set-force-quality">
+              <option value="">off</option>
+              <option value="inaccuracy">inaccuracy</option>
+              <option value="mistake">mistake</option>
+              <option value="blunder">blunder</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="checks">
+              <label class="check"><input type="checkbox" id="set-force-mate"> always play a mate when possible</label>
+              <label class="check"><input type="checkbox" id="set-allow-resign"> may resign</label>
+              <label class="check"><input type="checkbox" id="set-allow-draw"> may offer draws</label>
+            </div>
+          </div>
+          <button id="set-reset" type="button">Reset to defaults</button>
+          <p class="muted set-note">applies from the computer’s next move · saved in this browser</p>
+        </details>
+      </section>
     </aside>
   </main>
 
