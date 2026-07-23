@@ -2,7 +2,7 @@ import { Chess } from '../lib/chess.js';
 import { createBoard } from './board.js';
 import { pieceMarkup } from './pieces.js';
 import { createMockModel } from './mock-model.js';
-import { detectRemoteModel } from './remote-model.js';
+import { detectRemoteModel, lastDetectError, SERVER_BASE } from './remote-model.js';
 import { pickComputerMove, ENGINE_CONFIG } from './engine.js';
 import { VOCAB_SIZE, GLYPH_BY_QUALITY, sanToTokens } from './vocab.js';
 import './settings.js'; // the sidebar engine-settings panel (self-wiring)
@@ -25,12 +25,12 @@ async function connectModel() {
       if (badge) badge.textContent = `model: ${remote.name}`;
       return;
     }
-    console.log(`GPCT: model server unreachable (attempt ${attempt}) — using the mock model`);
-    if (badge) badge.textContent = 'model: mock — connecting to server…';
+    console.log(`GPCT: model server unreachable (attempt ${attempt}, ${lastDetectError}) — using the mock model`);
+    if (badge) badge.textContent = `model: mock — connecting to ${SERVER_BASE} (try ${attempt}: ${lastDetectError})`;
     await new Promise((r) => setTimeout(r, 5000));
   }
   const badge2 = $('backend-status');
-  if (badge2) badge2.textContent = 'model: mock — server unreachable';
+  if (badge2) badge2.textContent = `model: mock — ${SERVER_BASE} unreachable (${lastDetectError})`;
 }
 connectModel();
 let phase = 'setup'; // 'setup' | 'playing' | 'over'

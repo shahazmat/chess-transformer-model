@@ -50,14 +50,28 @@ export function createRemoteModel(base = SERVER_BASE, info = null) {
 }
 
 // Probe the server; resolves to a ready model or null if it isn't running.
+// On failure, lastDetectError says why (shown in the footer badge — the only
+// debugging surface a phone has).
+export let lastDetectError = null;
 export async function detectRemoteModel(base = SERVER_BASE) {
+  // Generous timeout: a phone on mobile data, or a Space that is waking from
+  // sleep, can take far longer than a LAN health check. Manual AbortController
+  // rather than AbortSignal.timeout() — the latter is missing from older
+  // mobile browsers, and its TypeError was being swallowed as "server down".
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
   try {
-    // Generous timeout: a phone on mobile data, or a Space that is waking
-    // from sleep, can take far longer than a LAN health check.
-    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(8000) });
-    if (!res.ok) return null;
+    const res = await fetch(`${base}/health`, { signal: ctrl.signal });
+    if (!res.ok) {
+      lastDetectError = `health ${res.status}`;
+      return null;
+    }
+    lastDetectError = null;
     return createRemoteModel(base, await res.json());
-  } catch {
+  } catch (e) {
+    lastDetectError = ctrl.signal.aborted ? 'timeout' : (e?.message ?? String(e));
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
