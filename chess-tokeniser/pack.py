@@ -3,13 +3,16 @@
 Reads the parquet shards written by build_dataset.py, frames each game with the
 frozen vocabulary
 
-    <bos> <elo-W> <elo-B>  <move tokens...>  <eos>
+    <bos> <elo-W> <elo-B>  <move tokens...>  [<resign>|<draw>]  <eos>
 
-maps every token to its id in js/vocab-data.js, splits into train/val, and
-streams the id stream to `train.bin` / `val.bin` as uint16 (the shape nanoGPT's
-data loaders memmap directly). Also writes `meta.pkl` (vocab_size, stoi, itos,
-special ids) so sample.py can print readable token streams, and a
-`pack_stats.json` report.
+(the game-end token comes from the shard's result/termination columns — see
+vocab.Vocab._end_id), maps every token to its id in js/vocab-data.js, splits
+into train/val, and streams the id stream to `train.bin` / `val.bin` as uint16
+(the shape nanoGPT's data loaders memmap directly). Also writes `meta.pkl`
+(vocab_size, stoi, itos, special ids) so sample.py can print readable token
+streams, per-split game-start indexes `train.idx.npy` / `val.idx.npy` (uint64
+offsets plus a total-length sentinel; nerf_batch.py samples whole games with
+them, lengths = np.diff), and a `pack_stats.json` report.
 
     pip install pyarrow numpy
     # time-based split (recommended): hold out one month as validation
@@ -24,6 +27,7 @@ the fraction split hashes the game id so it is reproducible across runs.
 from __future__ import annotations
 
 import argparse
+import array
 import glob
 import hashlib
 import json
@@ -38,8 +42,9 @@ import pyarrow.parquet as pq
 
 from vocab import ELO_ANY, get_vocab
 
-# columns we need from the build_dataset schema
-READ_COLS = ["utc_date", "white_elo", "black_elo", "n_plies", "tokens", "site"]
+# columns we need from the build_dataset schema (result/termination drive the
+# <resign>/<draw> game-end token; pre-v3 shards may lack them — handled below)
+READ_COLS = ["utc_date", "white_elo", "black_elo", "n_plies", "tokens", "site", "result", "termination"]
 
 
 def _year_month(utc_date: str) -> str:
@@ -91,17 +96,32 @@ def main():
 
     n_seen = n_packed = n_filtered = n_unknown = 0
     tok_train = tok_val = g_train = g_val = 0
+    end_resign = end_flag = end_draw = 0
+    max_game_tokens = over_513 = over_1025 = 0
+    off_train = array.array("Q")   # per-split game start offsets -> *.idx.npy
+    off_val = array.array("Q")
     unknown_examples: dict[str, int] = {}
+    warned_missing = False
 
     with open(train_path, "wb") as f_train, open(val_path, "wb") as f_val:
         for shard in shards:
             print(f"== {shard}")
             pf = pq.ParquetFile(shard)
-            for batch in pf.iter_batches(batch_size=args.batch, columns=READ_COLS):
-                cols = {name: batch.column(name).to_pylist() for name in READ_COLS}
-                for utc_date, w_elo, b_elo, n_plies, tokens, site in zip(
+            # pre-v3 shards lack result/termination: read what exists, fill the
+            # rest with None -> those games keep a bare-<eos> framing.
+            present = [c for c in READ_COLS if c in pf.schema_arrow.names]
+            absent = [c for c in READ_COLS if c not in pf.schema_arrow.names]
+            if absent and not warned_missing:
+                print(f"NOTE: shards lack columns {absent} — those games get no game-end token")
+                warned_missing = True
+            for batch in pf.iter_batches(batch_size=args.batch, columns=present):
+                cols = {name: batch.column(name).to_pylist() for name in present}
+                for name in absent:
+                    cols[name] = [None] * batch.num_rows
+                for utc_date, w_elo, b_elo, n_plies, tokens, site, result, termination in zip(
                     cols["utc_date"], cols["white_elo"], cols["black_elo"],
                     cols["n_plies"], cols["tokens"], cols["site"],
+                    cols["result"], cols["termination"],
                 ):
                     n_seen += 1
                     w_elo, b_elo = int(w_elo or 0), int(b_elo or 0)
@@ -116,25 +136,45 @@ def main():
                         continue
 
                     ids, unknown = vocab.encode_game(tokens, w_elo, b_elo,
-                                                     elo_dropout=args.elo_dropout, rng=rng)
+                                                     elo_dropout=args.elo_dropout, rng=rng,
+                                                     result=result, termination=termination)
                     if ids is None:
                         n_unknown += 1
                         for u in unknown:
                             unknown_examples[u] = unknown_examples.get(u, 0) + 1
                         continue
 
+                    if ids[-2] in (vocab.white_resign_id, vocab.black_resign_id):
+                        end_resign += 1
+                    elif ids[-2] in (vocab.white_flag_id, vocab.black_flag_id):
+                        end_flag += 1
+                    elif ids[-2] == vocab.draw_id:
+                        end_draw += 1
+                    max_game_tokens = max(max_game_tokens, len(ids))
+                    over_513 += len(ids) > 513    # too long for a block-512 row
+                    over_1025 += len(ids) > 1025  # too long for a block-1024 row
+
                     to_val = _year_month(utc_date) in val_months if val_months else _in_val(site, args.val_frac)
                     buf = np.asarray(ids, dtype=np.uint16).tobytes()
                     if to_val:
+                        off_val.append(tok_val)
                         f_val.write(buf)
                         tok_val += len(ids)
                         g_val += 1
                     else:
+                        off_train.append(tok_train)
                         f_train.write(buf)
                         tok_train += len(ids)
                         g_train += 1
                     n_packed += 1
             print(f"  packed {n_packed:,} games ({n_packed / max(1e-9, time.time() - t0):,.0f}/s)")
+
+    # game-start indexes: uint64 offsets + a final total-length sentinel per
+    # split, so nerf_batch.py can sample whole games without scanning the bins.
+    off_train.append(tok_train)
+    off_val.append(tok_val)
+    np.save(os.path.join(args.out, "train.idx.npy"), np.asarray(off_train, dtype=np.uint64))
+    np.save(os.path.join(args.out, "val.idx.npy"), np.asarray(off_val, dtype=np.uint64))
 
     # meta.pkl — nanoGPT reads vocab_size/stoi/itos; the rest aids the harness.
     with open(os.path.join(args.out, "meta.pkl"), "wb") as f:
@@ -148,6 +188,11 @@ def main():
                 "core_count": vocab.core_count,
                 "elo_tokens": [t for t in vocab.tokens if t.startswith("<elo-") and t != ELO_ANY],
                 "elo_any_id": vocab.elo_any_id,
+                "white_resign_id": vocab.white_resign_id,
+                "black_resign_id": vocab.black_resign_id,
+                "white_flag_id": vocab.white_flag_id,
+                "black_flag_id": vocab.black_flag_id,
+                "draw_id": vocab.draw_id,
             },
             f,
         )
@@ -163,6 +208,13 @@ def main():
         "train_tokens": tok_train,
         "val_tokens": tok_val,
         "tokens_per_game": round((tok_train + tok_val) / max(1, n_packed), 1),
+        "games_end_resign": end_resign,
+        "games_end_flag": end_flag,
+        "games_end_draw": end_draw,
+        "games_end_bare": n_packed - end_resign - end_flag - end_draw,
+        "max_game_tokens": max_game_tokens,
+        "games_over_513_tokens": over_513,
+        "games_over_1025_tokens": over_1025,
         "split": ("months:" + ",".join(sorted(val_months))) if val_months else f"frac:{args.val_frac}",
         "elo_dropout": args.elo_dropout,
         "unknown_token_top": dict(sorted(unknown_examples.items(), key=lambda kv: -kv[1])[:20]),

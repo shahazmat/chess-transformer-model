@@ -95,7 +95,7 @@ subprocess.run(pack, cwd=CODE_DIR, check=True)
 print(f"== uploading to {OUT_REPO}", flush=True)
 create_repo(OUT_REPO, repo_type="dataset", exist_ok=True)
 upload_folder(repo_id=OUT_REPO, repo_type="dataset", folder_path="/tmp/data",
-              allow_patterns=["*.bin", "meta.pkl", "pack_stats.json"],
+              allow_patterns=["*.bin", "*.idx.npy", "meta.pkl", "pack_stats.json"],
               commit_message="packed train/val bins")
 if os.environ.get("UPLOAD_INTERMEDIATE", "1") == "1":
     upload_folder(repo_id=OUT_REPO, repo_type="dataset", folder_path="/tmp/tok", path_in_repo="tokenised",

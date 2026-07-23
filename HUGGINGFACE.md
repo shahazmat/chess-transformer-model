@@ -1,4 +1,4 @@
-# Running the chess-gpt workflow on Hugging Face
+# Running the GPCT workflow on Hugging Face
 
 This is the operational runbook for taking the pipeline in
 [`chess-tokeniser/`](chess-tokeniser/README.md) from raw Lichess games to a
@@ -142,9 +142,10 @@ hf jobs uv run --flavor cpu-performance --timeout 4h -s HF_TOKEN -e CODE_REPO=<y
 ```
 
 Monitor exactly as in §4 (`hf jobs ps` / `logs` / `cancel`, or the printed job
-URL). When it finishes, `train.bin`/`val.bin`/`meta.pkl` are in your dataset repo
-(with the re-packable parquet under `tokenised/`), and **your laptop never
-tokenised anything**.
+URL). When it finishes, `train.bin`/`val.bin`/`meta.pkl` plus the
+`train.idx.npy`/`val.idx.npy` game indexes are in your dataset repo (with the
+re-packable parquet under `tokenised/`), and **your laptop never tokenised
+anything**.
 
 > If you'd rather not mount local code each run, upload the pipeline to an HF repo
 > once and pass `-e CODE_REPO=<you>/chess-pipeline` instead of the `-v` flags — see
@@ -214,6 +215,14 @@ hf jobs uv run \
 - The default UV image installs a **CUDA build of torch** automatically on GPU
   flavors, so no custom image is needed.
 
+> **The job auto-applies the bare-history nerf transform** (TRAINING.md §5):
+> `train_chess_hf.py` pins nanoGPT to a commit and reroutes `get_batch` through
+> an embedded copy of `chess-tokeniser/nerf_batch.py` (`test_nerf_batch.py`
+> keeps the two byte-identical). Only ~10–25% of each batch is graded, so give
+> runs more iterations than a vanilla nanoGPT budget — e.g. add
+> `-e MAX_ITERS=6000` to the smoke command above — and never compare losses
+> against a checkpoint trained without the transform.
+
 The command prints a **job URL** (`https://huggingface.co/jobs/<you>/<id>`) —
 open it for live logs, or watch from the terminal:
 
@@ -228,13 +237,22 @@ When the smoke run works, scale up to the real network:
 
 ```bash
 hf jobs uv run \
-  --flavor a10g-large --timeout 6h \
+  --flavor a100-large --timeout 24h \
   -s HF_TOKEN \
   -e DATA_REPO=<you>/lichess-chess-tokens \
   -e MODEL_REPO=<you>/chess-gpt \
   -e PROFILE=full \
   chess-tokeniser/train_chess_hf.py
 ```
+
+Sizing the full run (8×512, block 1024, batch 64, 100k iters ≈ 6.5B tokens
+through the model): roughly **4–6 h ≈ $11–15 on `a100-large`**, or ~9–11 h ≈
+$14–17 on the slower `a10g-large`. The a100 is faster *and* usually cheaper
+here. `--timeout` is a kill-cap, not a cost — you pay for seconds actually
+run, so always set it far above the estimate. While training, the script also
+**pushes `ckpt.pt` to the model repo every `PUSH_EVERY_MIN` minutes**
+(default 20), so even a crashed or timed-out job keeps all but the last few
+minutes of progress.
 
 > ⚠️ **The single biggest footgun: the default job timeout is 30 minutes.** A
 > job that hits it is *killed*, checkpoint and all. **Always pass `--timeout`**
@@ -246,16 +264,20 @@ hf jobs uv run \
 
 ### Runs longer than one job: chunked resume
 
-For a multi-hour `full` run you don't want riding on a single job. The script
-supports **resume**: each job trains `MAX_ITERS` more iterations, pushes the
-checkpoint, and the next job continues from it.
+For a multi-hour `full` run you can split the schedule across jobs. Two facts
+make it correct: `MAX_ITERS` is the **absolute iteration this job stops at**
+(nanoGPT resumes at the checkpoint's iteration and trains until `max_iters`),
+so it must be raised each call — repeating the same value trains nothing. And
+`TOTAL_ITERS` pins the lr-decay horizon to the final goal so every chunk
+decays on the same curve instead of stretching the schedule.
 
 ```bash
-# run this repeatedly; each call advances the checkpoint by 20k iters
-hf jobs uv run --flavor a10g-large --timeout 6h -s HF_TOKEN \
+# chunk 1 (fresh):            stops at iter 25k
+hf jobs uv run --flavor a100-large --timeout 6h -s HF_TOKEN \
   -e DATA_REPO=<you>/lichess-chess-tokens -e MODEL_REPO=<you>/chess-gpt \
-  -e PROFILE=full -e RESUME=1 -e MAX_ITERS=20000 \
+  -e PROFILE=full -e TOTAL_ITERS=100000 -e MAX_ITERS=25000 \
   chess-tokeniser/train_chess_hf.py
+# chunk 2: add RESUME=1 and raise MAX_ITERS to 50000; then 75000; then 100000
 ```
 
 > **Advanced alternative — mountable storage buckets.** The CLI can mount an HF
@@ -275,11 +297,23 @@ hf download <you>/chess-gpt --repo-type model --local-dir ./ckpt
 # → ./ckpt/ckpt.pt  and  ./ckpt/meta.pkl
 ```
 
-That completes the data/compute loop. Turning `ckpt.pt` into something the
-browser harness can call (`window.chessGpt.setModel`, milestone 6 in
-[TRAINING.md](TRAINING.md)) is a separate export step — ONNX / transformers.js in
-the browser, or a small local inference server behind `predict(ctx)`. The
-model's output vocabulary is the 5,267-token space in
+That completes the data/compute loop. To **play the checkpoint in the browser
+harness**, run the local inference server (milestone 6's `predict(ctx)` seam):
+
+```bash
+pip install torch huggingface_hub
+python tools/model_server.py --repo <you>/chess-gpt        # downloads ckpt.pt + meta.pkl
+# optional: --model-elo 1600   (Elo bucket the model plays at; default <elo-any>)
+#           --local ./out      (serve a local ckpt dir instead of downloading)
+```
+
+Then open the harness (`node tools/serve.mjs`) — [`js/app.js`](js/app.js)
+auto-detects the server on `127.0.0.1:8123` and swaps the mock model for the
+real one (the page console names the live model; the server owns the
+bare-history context assembly documented in [`js/engine.js`](js/engine.js)).
+Restart the server after pushing a new checkpoint to pick it up. ONNX /
+transformers.js in-browser inference remains the polished follow-up. The
+model's output vocabulary is the 5,273-token space in
 [`js/vocab-data.js`](js/vocab-data.js); `meta.pkl` carries the matching
 `stoi`/`itos`.
 

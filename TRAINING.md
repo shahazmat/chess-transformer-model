@@ -16,6 +16,37 @@ nerf tokens derived from real engine evaluations, packed into nanoGPT's
 > games so the model also learns unconditioned play (inference can omit Elo). What
 > remains is *running* the training (Stages/milestones 4–6), not building the
 > data pipeline.
+>
+> **Update (2026-07-22): bare-history nerf training is implemented.**
+> `train_chess_hf.py` (nanoGPT now pinned) reroutes `get_batch` through
+> [`chess-tokeniser/nerf_batch.py`](chess-tokeniser/nerf_batch.py) so a nerf
+> token is only ever in context beside the move it labels (see the
+> "Bare-history rule" in §5), and the harness keeps `historyTokens` bare to
+> match ([`js/app.js`](js/app.js)). Any checkpoint trained before this scheme
+> is obsolete — re-run the smoke before trusting any metric.
+>
+> **Update (2026-07-22, later): vocab v3 game-end tokens + strict
+> one-game-per-row batching.** Five colour-differentiated game-end tokens are
+> appended: `<white-resign>` (5268), `<black-resign>` (5269), `<white-flag>`
+> (5270), `<black-flag>` (5271), `<draw>` (5272) — total **5,273**.
+> `build_dataset.py` now carries the Lichess `Termination` header through, and
+> `pack.py` emits `… <end-token> <eos>` per `vocab.Vocab._end_id`: the token
+> names the LOSER from the Result header — never from parity, since players
+> often resign right after their own move (both parities are kept; at play the
+> engine only samples its OWN colour's resign token, so opposite-parity
+> occurrences are context/gauge signal, not a "resign while winning" hazard).
+> Decisive time forfeits get the loser's flag token (training/gauge only —
+> never sampled; the harness has no clocks); mates, timeout-draws, and junk
+> terminations stay bare. Batching is now **strict one-game-per-row**:
+> `nerf_batch.py` samples whole games via the `train/val.idx.npy` indexes
+> `pack.py` writes — length-bucketed, right-padded, `(rows, cap)`-shaped
+> batches — so **games can never attend to earlier games**, and the end group
+> (game-end token + `<eos>`) is graded in every row. The harness offers you a
+> draw when the model samples `<draw>` (declining masks it for the rest of the
+> game) and resigns on its own resign token. Pre-v3 datasets and checkpoints
+> are incompatible: rebuild Stage 1+2 and train from scratch — **never
+> `RESUME=1` a pre-v3 checkpoint onto v3 data** (its 5,268-wide embedding
+> cannot index the new ids).
 
 ## 1. Source: the Lichess open database
 
@@ -168,6 +199,47 @@ readable token streams).
   conditioned Elo bucket, (4) per-move NLL on val (comparable across
   tokenizer changes; per-token loss is not).
 
+### The bare-history rule (nerf tokens in training)
+
+The packed stream stores games **fully annotated**, but the model must never
+*rely* on annotated history: at inference the human's moves are never
+annotated (there is no engine), and the harness keeps even the computer's own
+emitted nerfs out of `historyTokens`. So training enforces, at batch time:
+
+> a nerf token may appear in the context only while the move it labels is
+> being predicted (final history token, or mid-move); every later prediction
+> sees the game with that nerf removed.
+
+Batching is **strict one-game-per-row**: a training row is ONE complete game,
+`<bos>` at position 0 (exactly the layout inference sees), right-padded to a
+length-bucket cap (pad targets `-1`, pad inputs `<eos>` — causally invisible
+to the game). Games can never attend to another game — there is no other game
+in the row. Rows come from the `train/val.idx.npy` game index `pack.py`
+writes (with a one-time `<bos>`-scan fallback for older data repos), buckets
+are drawn ∝ token mass with fixed rows-per-cap so `torch.compile` sees a
+small fixed shape family, and a hard guard raises if an index would ever
+slice mid-game.
+
+Within its game, [`nerf_batch.py`](chess-tokeniser/nerf_batch.py) — installed
+into nanoGPT's `get_batch` by `train_chess_hf.py` — builds one consistent
+view: nerf tokens cut the game into segments (one per annotated move, cut
+*after* the move, plus a tail); one segment is chosen uniformly; every other
+nerf is deleted; and loss applies to the chosen segment **plus the end group
+— the game's final `<resign>`/`<draw>` (when present) and `<eos>`, graded in
+every row** (how games end is exactly what the end tokens exist to learn, and
+their bare context matches inference). Targets elsewhere, targets across a
+deletion seam (a stripped move must not be graded as clean — that would
+poison the clean branch), and `<bos>`/`<elo-*>` framing targets are masked to
+`-1`, which nanoGPT's `cross_entropy(ignore_index=-1)` skips.
+`test_nerf_batch.py` pins the exact hand-worked rows, the isolation guard,
+and the index round-trip.
+
+Consequences to plan around: only a fraction of each batch is graded, so
+budget more iterations than a vanilla run (smoke: `-e MAX_ITERS=6000`);
+**losses are not comparable** across batching schemes (different task,
+different averaging set); and the first eval is slow while `torch.compile`
+builds the handful of `(rows, cap)` shape variants.
+
 ## 6. Milestones
 
 | # | deliverable | check | status |
@@ -176,7 +248,9 @@ readable token streams).
 | 1 | `build_dataset.py` → tokenised parquet | 0 SAN parse errors on real games | ✅ |
 | 2 | labeller (`tokeniser.classify`, Lichess win%-drop thresholds) | blunder-rate vs Elo plot is monotone | 🟡 code done; sanity plot not yet scripted |
 | 3 | vocab v2 (`<bos>`/`<eos>`/`<elo-*>`) + Python tokenizer (`vocab.py`) | round-trips vs `vocab-data.js` ids | ✅ `test_pack.py` (round-trip + JS↔Python parity) |
-| 4 | `pack.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard | 🟡 bins produced + verified; smoke run pending |
+| 4 | `pack.py` → `train.bin`/`val.bin`/`meta.pkl` | tiny 4×128 smoke run overfits a shard | 🟡 bins produced + verified; smoke run pending (re-run: pre-bare-history ckpt is obsolete) |
+| 4.5 | bare-history nerf batching (`nerf_batch.py`, patched `get_batch`, bare `historyTokens`) | `test_nerf_batch.py` reproduces the hand-worked rows; probe model sees bare history in the harness | ✅ |
+| 4.6 | vocab v3 (colour-differentiated `<white/black-resign>`, `<white/black-flag>`, `<draw>`) + strict one-game-per-row bucketed batching + harness draw-offer/resign flow | `test_pack.py` end-token framing (both parities, flags); `test_nerf_batch.py` isolation guard + end-group rows; mock model exercises both flows | ✅ code done; needs Stage 1+2 rebuild & fresh run |
 | 5 | 8×512 run on 15–20M games | pre-mask legal mass ≫ 99%; nerf rate tracks Elo | ⬜ |
 | 6 | export checkpoint behind `predict(ctx)` (ONNX / transformers.js or a local server) and plug into `window.chessGpt.setModel` | play it in the harness | ⬜ |
 

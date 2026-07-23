@@ -10,10 +10,11 @@ emits (`[Nf3]`, `[x]`, `[??]`) to the *bare* forms the dictionary stores
 (`Nf3`, `x`, `<blunder>`), and the game-framing used to pack games into one
 stream:
 
-    <bos> <elo-W> <elo-B>  <move tokens...>  <eos>
+    <bos> <elo-W> <elo-B>  <move tokens...>  [<resign>|<draw>]  <eos>
 
-The <bos>/<eos>/<elo-*> tokens are "vocab v2" — appended after the nerf tokens
-in js/vocab-data.js without disturbing any pre-existing id.
+The <bos>/<eos>/<elo-*> tokens are "vocab v2", the <resign>/<draw> game-end
+tokens are "vocab v3" — both pure appends to js/vocab-data.js that disturb no
+pre-existing id.
 """
 from __future__ import annotations
 
@@ -35,7 +36,16 @@ GLYPH_TO_NERF = {"??": "<blunder>", "?": "<mistake>", "?!": "<inaccuracy>"}
 
 BOS = "<bos>"
 EOS = "<eos>"
-ELO_ANY = "<elo-any>"   # "strength unspecified" sentinel (see encode_game)
+ELO_ANY = "<elo-any>"        # "strength unspecified" sentinel (see encode_game)
+# vocab v3 game-end tokens, emitted just before <eos> (see Vocab._end_id).
+# Resigns/flags are colour-differentiated: resignations happen on either turn
+# (often right after the loser's own move), so colour is not inferable from
+# parity; flags get colour too for uniformity. <draw> is symmetric — no colour.
+WHITE_RESIGN = "<white-resign>"
+BLACK_RESIGN = "<black-resign>"
+WHITE_FLAG = "<white-flag>"
+BLACK_FLAG = "<black-flag>"
+DRAW = "<draw>"
 
 
 def translate(token: str) -> str:
@@ -80,8 +90,10 @@ class Vocab:
         self.stoi = {t: i for i, t in enumerate(tokens)}
         self.itos = {i: t for i, t in enumerate(tokens)}
         self.size = len(tokens)
-        # structural ids used during framing (fail loudly if vocab v2 is missing)
-        missing = [t for t in (BOS, EOS, ELO_ANY, "<elo-u800>", "<elo-3000p>") if t not in self.stoi]
+        # structural ids used during framing (fail loudly if vocab v2/v3 is missing)
+        missing = [t for t in (BOS, EOS, ELO_ANY, "<elo-u800>", "<elo-3000p>",
+                               WHITE_RESIGN, BLACK_RESIGN, WHITE_FLAG, BLACK_FLAG, DRAW)
+                   if t not in self.stoi]
         if missing:
             raise ValueError(
                 f"vocab-data.js is missing structural tokens {missing}; "
@@ -90,6 +102,11 @@ class Vocab:
         self.bos_id = self.stoi[BOS]
         self.eos_id = self.stoi[EOS]
         self.elo_any_id = self.stoi[ELO_ANY]
+        self.white_resign_id = self.stoi[WHITE_RESIGN]
+        self.black_resign_id = self.stoi[BLACK_RESIGN]
+        self.white_flag_id = self.stoi[WHITE_FLAG]
+        self.black_flag_id = self.stoi[BLACK_FLAG]
+        self.draw_id = self.stoi[DRAW]
 
     # -- framing -------------------------------------------------------------
 
@@ -99,14 +116,59 @@ class Vocab:
             return self.elo_any_id
         return self.stoi[elo_bucket_token(elo)]
 
-    def encode_game(self, tokens_field: str, white_elo, black_elo, elo_dropout: float = 0.0, rng=None):
-        """Frame one game as ids: <bos> <elo-W> <elo-B> <moves...> <eos>.
+    def _end_id(self, result, termination, saw_mate: bool):
+        """Game-end token id for HOW the game ended, or None for a bare <eos>.
+
+        Header-only classification (the pipeline never replays the board), with
+        the actor's COLOUR taken from Result — never from parity, because
+        players often resign right after their own move, i.e. on the winner's
+        turn (flags, by the clock rules, always belong to the side to move, but
+        the colour token keeps them uniform and parity-proof too):
+          * <draw>  — Result 1/2-1/2 with Termination "Normal". Includes
+            rule-draws (stalemate/repetition/...): those positions are terminal
+            for the harness anyway, and "offers a draw in a dead position" is
+            the behaviour we want. Timeout-draws (flag vs. insufficient
+            material, Termination "Time forfeit") stay bare — a flag token
+            implies a loss and <draw> would mislabel the clock death.
+          * <white-resign>/<black-resign> — decisive Result with Termination
+            "Normal" and no mate in the movetext (mate is its own signal); the
+            token names the LOSER. Both parities are kept: at play the engine
+            only ever samples its OWN colour's resign token on its own turn,
+            so opposite-parity occurrences are gauge/context signal, never a
+            "resign while winning" hazard.
+          * <white-flag>/<black-flag> — decisive Result with Termination
+            "Time forfeit"; the token names the LOSER. Never sampled in play
+            (the harness has no clocks) — they exist so time-forfeit games
+            don't end with an uninformative bare <eos> that teaches "games
+            just stop after ordinary moves".
+        Everything else (Abandoned, Rules infraction, '*', missing headers)
+        keeps the bare <eos>.
+        """
+        if result == "1/2-1/2":
+            return self.draw_id if termination == "Normal" else None
+        if result not in ("1-0", "0-1"):
+            return None
+        white_lost = result == "0-1"
+        if termination == "Normal" and not saw_mate:
+            return self.white_resign_id if white_lost else self.black_resign_id
+        if termination == "Time forfeit":
+            return self.white_flag_id if white_lost else self.black_flag_id
+        return None
+
+    def encode_game(self, tokens_field: str, white_elo, black_elo, elo_dropout: float = 0.0, rng=None,
+                    result=None, termination=None):
+        """Frame one game as ids: <bos> <elo-W> <elo-B> <moves...> [<end>] <eos>.
 
         `tokens_field` is the space-joined bracketed stream from build_dataset.
         With `elo_dropout` > 0 and a `random.Random` `rng`, each Elo slot is
         INDEPENDENTLY replaced by <elo-any> with that probability — so the model
         also sees unconditioned / half-conditioned games and inference can omit
         or neutralise Elo. rng makes the choice reproducible; pass a seeded one.
+
+        `result` ("1-0"/"0-1"/"1/2-1/2") and `termination` (the Lichess
+        Termination header) drive the colour-differentiated game-end token
+        (see _end_id); left at None — e.g. when packing pre-v3 shards — the
+        game ends with a bare <eos> exactly as before.
 
         Returns (ids, unknown_tokens). If any move token is outside the frozen
         dictionary, ids is None and unknown_tokens names the offenders (the
@@ -116,14 +178,21 @@ class Vocab:
         """
         ids = [self.bos_id, self._elo_id(white_elo, elo_dropout, rng), self._elo_id(black_elo, elo_dropout, rng)]
         unknown: set[str] = set()
+        saw_mate = False
         for tok in tokens_field.split():
-            sid = self.stoi.get(translate(tok))
+            surface = translate(tok)
+            sid = self.stoi.get(surface)
             if sid is None:
                 unknown.add(tok)
-            else:
-                ids.append(sid)
+                continue
+            ids.append(sid)
+            if surface == "#":
+                saw_mate = True
         if unknown:
             return None, unknown
+        end_id = self._end_id(result, termination, saw_mate)
+        if end_id is not None:
+            ids.append(end_id)
         ids.append(self.eos_id)
         return ids, unknown
 

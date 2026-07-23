@@ -53,12 +53,16 @@ def _regroup(stream):
 
 def test_vocab_shape():
     v = vb.get_vocab()
-    assert v.size == 5268 and v.core_count == 5242
+    assert v.size == 5273 and v.core_count == 5242
     assert v.tokens[v.bos_id] == "<bos>" and v.tokens[v.eos_id] == "<eos>"
     buckets = [t for t in v.tokens if t.startswith("<elo-") and t != vb.ELO_ANY]
     assert len(buckets) == 13 and buckets[0] == "<elo-u800>" and buckets[-1] == "<elo-3000p>"
-    assert vb.ELO_ANY in v.stoi and v.tokens[-1] == vb.ELO_ANY   # sentinel appended last
-    # vocab v2 is a pure append: bos sits exactly at the old vocab size
+    assert vb.ELO_ANY in v.stoi and v.tokens[-6] == vb.ELO_ANY   # last structural token
+    # vocab v3: the game-end tokens are the final pure append
+    assert v.tokens[-5:] == [vb.WHITE_RESIGN, vb.BLACK_RESIGN, vb.WHITE_FLAG, vb.BLACK_FLAG, vb.DRAW]
+    assert (v.white_resign_id, v.black_resign_id) == (5268, 5269)
+    assert (v.white_flag_id, v.black_flag_id, v.draw_id) == (5270, 5271, 5272)
+    # vocab v2/v3 are pure appends: bos sits exactly at the pre-v2 vocab size
     assert v.bos_id == 5252
 
 
@@ -117,7 +121,7 @@ def test_js_python_vocab_parity():
     probe = "800,799,1234,1600,1899,2999,3000,3200"
     js = (
         "import {TOKENS, eloBucketToken} from './js/vocab.js';"
-        "console.log(JSON.stringify({n: TOKENS.length, tail: TOKENS.slice(-16),"
+        "console.log(JSON.stringify({n: TOKENS.length, tail: TOKENS.slice(-21),"
         f"elo: '{probe}'.split(',').map(e => eloBucketToken(+e))}}));"
     )
     try:
@@ -131,7 +135,7 @@ def test_js_python_vocab_parity():
     assert out.returncode == 0, out.stderr
     data = json.loads(out.stdout)
     assert data["n"] == v.size
-    assert data["tail"] == v.tokens[-16:]
+    assert data["tail"] == v.tokens[-21:]
     assert data["elo"] == [vb.elo_bucket_token(int(e)) for e in probe.split(",")]
 
 
@@ -154,6 +158,44 @@ def test_elo_dropout():
         seen_any |= "<elo-any>" in (w, b)
         seen_real |= (w == "<elo-1400>" or b == "<elo-2400>")
     assert seen_any and seen_real
+
+
+def test_end_token_framing():
+    """Game-end classification: header-driven, colour from Result (never from
+    parity — resignations happen on either turn), mate-excluded."""
+    v = vb.get_vocab()
+    tail = lambda ids: v.decode(ids)[-2:]
+    # draw (agreement or rule) -> <draw> <eos>
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500, result="1/2-1/2", termination="Normal")
+    assert tail(ids) == [vb.DRAW, vb.EOS]
+    # resignation names the LOSER, whatever the parity:
+    #   1 ply, 1-0 -> Black resigned on its turn
+    ids, _ = v.encode_game("[e4]", 1500, 1500, result="1-0", termination="Normal")
+    assert tail(ids) == [vb.BLACK_RESIGN, vb.EOS]
+    #   2 plies, 0-1 -> White resigned on its turn
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500, result="0-1", termination="Normal")
+    assert tail(ids) == [vb.WHITE_RESIGN, vb.EOS]
+    #   2 plies, 1-0 -> Black resigned right after its own move (winner's turn):
+    #   kept, with the colour making it unambiguous
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500, result="1-0", termination="Normal")
+    assert tail(ids) == [vb.BLACK_RESIGN, vb.EOS]
+    # mate in the movetext is its own signal: bare <eos>
+    ids, _ = v.encode_game("[e4] [e5] [#] [Qh5]", 1500, 1500, result="1-0", termination="Normal")
+    assert tail(ids) == ["Qh5", vb.EOS]
+    # decisive time forfeits name the flagged LOSER
+    ids, _ = v.encode_game("[e4]", 1500, 1500, result="1-0", termination="Time forfeit")
+    assert tail(ids) == [vb.BLACK_FLAG, vb.EOS]
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500, result="0-1", termination="Time forfeit")
+    assert tail(ids) == [vb.WHITE_FLAG, vb.EOS]
+    # timeout-DRAWS (flag vs. insufficient material) stay bare: a flag token
+    # implies a loss and <draw> would mislabel the clock death
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500, result="1/2-1/2", termination="Time forfeit")
+    assert tail(ids) == ["e5", vb.EOS]
+    # other terminations and legacy shards (no result/termination) stay bare
+    ids, _ = v.encode_game("[e4]", 1500, 1500, result="1-0", termination="Abandoned")
+    assert tail(ids) == ["e4", vb.EOS]
+    ids, _ = v.encode_game("[e4] [e5]", 1500, 1500)
+    assert tail(ids) == ["e5", vb.EOS]
 
 
 if __name__ == "__main__":

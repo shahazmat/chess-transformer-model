@@ -31,13 +31,14 @@ HF Lichess parquet
   tokenised/*.parquet       tokens="[Nf3] [x] [Bb5] [??] [e5] …"  + cp[] + metadata
       │  pack.py            (frame · map to frozen ids · time-split · uint16)
       ▼
-  data/chess/{train.bin, val.bin, meta.pkl}   →  nanoGPT
+  data/chess/{train.bin, val.bin, *.idx.npy, meta.pkl}   →  nanoGPT
 ```
 
-Each game is framed with the vocab-v2 structural tokens:
+Each game is framed with the vocab-v2 structural tokens plus, when the game
+ended that way, a vocab-v3 game-end token:
 
 ```
-<bos> <elo-W> <elo-B>   [move tokens…]   <eos>
+<bos> <elo-W> <elo-B>   [move tokens…]   [<white-resign>|<black-resign>|<white-flag>|<black-flag>|<draw>]   <eos>
 ```
 
 `<bos>`/`<eos>` are the **start/end-game tokens** that separate games in the
@@ -45,11 +46,19 @@ packed stream; the two `<elo-*>` buckets condition the model on each player's
 strength. `pack.py --elo-dropout P` (default 0.15) independently replaces each
 bucket with the `<elo-any>` sentinel for a fraction of games, so the model also
 learns **unconditioned play** — at inference you can feed `<elo-any>` (per side)
-to omit/neutralise Elo instead of being forced to specify it. These structural
-tokens live at the end of `../js/vocab-data.js` (ids 5252–5267), appended after
-the nerf tokens without disturbing any pre-existing id.
+to omit/neutralise Elo instead of being forced to specify it. The game-end
+token says HOW the game ended and WHO acted, with the colour taken from the
+Result header — never from parity, because players often resign right after
+their own move: resign tokens name the loser of a decisive Termination-"Normal"
+game without a mate in the movetext (mate is its own signal); flag tokens name
+the loser of a decisive "Time forfeit" (training/gauge only — the harness has
+no clocks, so they are never sampled in play); `<draw>` marks `1/2-1/2` with
+Termination "Normal" (no colour — the outcome is symmetric). Mates,
+timeout-draws, and junk terminations keep a bare `<eos>`. Structural tokens sit
+at ids 5252–5267 and the end tokens at 5268–5272 in `../js/vocab-data.js` —
+every extension is a pure append that disturbs no pre-existing id.
 
-**The training vocabulary is `../js/vocab-data.js` (5,268 tokens), not
+**The training vocabulary is `../js/vocab-data.js` (5,273 tokens), not
 `build_dataset`'s `vocab.json`.** That `vocab.json` is a frequency report over
 one run; the frozen dictionary is the geometry-derived superset of all legal SAN
 that the JS harness, the packed data, and the trained model all share. `pack.py`
@@ -62,18 +71,29 @@ outside it — ~0 on real data.
 - `build_dataset.py` — Stage 1 CLI: streams HF parquet (or local files), filters
   to eval-annotated games, tokenises in parallel, writes zstd parquet + vocab
 - `vocab.py` — loads the frozen dictionary from `../js/vocab-data.js`; owns the
-  bracket→id translation, Elo bucketing, and `<bos>/<eos>` game framing
+  bracket→id translation, Elo bucketing, `<bos>/<eos>` game framing, and the
+  colour-differentiated game-end classification (`Vocab._end_id`)
 - `pack.py` — Stage 2 CLI: frames + maps + time-splits into `train.bin`/
-  `val.bin`/`meta.pkl`
-- `test_tokeniser.py`, `test_pack.py` — unit tests (incl. a verbatim real game;
-  the frozen vocab is checked for full coverage and JS↔Python parity)
+  `val.bin`/`meta.pkl`, plus per-split `train.idx.npy`/`val.idx.npy` game-start
+  indexes (uint64 offsets + total sentinel) for one-game-per-row sampling
+- `nerf_batch.py` — training-time batch sampler: STRICT one-game-per-row
+  (length-bucketed, right-padded, hard-guarded so games never share an
+  attention window) with the bare-history nerf rule inside each game — a nerf
+  token is only ever in context beside the move it labels — and the end group
+  (`<resign>/<draw>/<eos>`) graded in every row
+  (`train_chess_hf.py` embeds a byte-identical copy and patches it into
+  nanoGPT's `get_batch`; see TRAINING.md "bare-history rule")
+- `test_tokeniser.py`, `test_pack.py`, `test_nerf_batch.py` — unit tests
+  (incl. a verbatim real game; the frozen vocab is checked for full coverage
+  and JS↔Python parity; the bare-history rows are pinned against hand-worked
+  examples and the embedded copy is checked byte-for-byte)
 - `gen_synthetic.py` — offline validation corpus generator
 
 ## Run
 
 ```bash
 pip install duckdb pyarrow numpy
-python test_tokeniser.py && python test_pack.py      # sanity check
+python test_tokeniser.py && python test_pack.py && python test_nerf_batch.py  # sanity check
 
 # --- Stage 1: tokenise (needs internet access to huggingface.co) ---
 # validation slice: ~200k games from one month (minutes)
@@ -90,8 +110,8 @@ python pack.py --in ./tokenised --out ./data/chess --val-months 2025-06
 python pack.py --in ./tok_slice --out ./data/chess --val-frac 0.05
 ```
 
-`meta.pkl` carries `vocab_size`, `stoi`, `itos`, and the `<bos>`/`<eos>` ids so
-nanoGPT's `sample.py` can print readable token streams.
+`meta.pkl` carries `vocab_size`, `stoi`, `itos`, and the `<bos>`/`<eos>` +
+game-end token ids so nanoGPT's `sample.py` can print readable token streams.
 
 To push the Stage 1 intermediate to your HF dataset repo:
 
@@ -106,6 +126,7 @@ hf upload-large-folder <you>/lichess-annotated-tokenised --repo-type dataset ./t
 |---|---|---|
 | site | string | lichess game URL (id) |
 | utc_date, time_control, result, eco | string | metadata for filtering |
+| termination | string | Lichess Termination header — drives the game-end token in pack.py |
 | white_elo, black_elo | int16 | |
 | n_plies | int16 | |
 | tokens | large_string | space-joined token stream |
