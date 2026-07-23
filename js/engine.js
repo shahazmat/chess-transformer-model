@@ -60,8 +60,8 @@ export const ENGINE_CONFIG = {
   temperature: 1,          // p_i ^ (1/T) over each masked step; <1 sharpens.
                            // This is the OPENING temperature — the stages below
                            // step it down as the game goes on.
-  tempMidFrom: 15,         // fullmove the middlegame temperature kicks in (0 = never)
-  tempMid: 0.7,
+  tempMidFrom: 10,         // fullmove the middlegame temperature kicks in (0 = never)
+  tempMid: 0.05,
   tempEndFrom: 30,         // fullmove the endgame temperature kicks in (0 = never)
   tempEnd: 0.4,
   allowNerfTokens: ['<inaccuracy>'],
@@ -74,16 +74,16 @@ export const ENGINE_CONFIG = {
                            // is taken as drawn (p=1) on the first step, the move
                            // decodes conditioned on it, and the UI annotates it.
                            // Overrides allowNerfTokens (no second nerf is drawn).
-  minP: 0.1,               // decode-step floor: tokens under this masked
+  minP: 0.05,               // decode-step floor: tokens under this masked
                            // probability are dropped before sampling (0 = off).
                            // If nothing clears the bar, the best token survives.
-  minPExempt: ['<inaccuracy>'],
+  minPExempt: [],
                            // tokens the minP floor never drops — they stay
                            // sampleable at their (renormalized) model weight.
   minPFromMove: 10,        // apply the minP floor only from this fullmove number
                            // onwards (1 = the whole game); earlier moves sample
                            // the unfloored distribution.
-  topP: 0.6,               // nucleus sampling per decode step: keep the smallest
+  topP: 0.7,               // nucleus sampling per decode step: keep the smallest
                            // set of highest-probability tokens whose cumulative
                            // mass reaches this, renormalize, sample (1 = off).
                            // minPExempt tokens always survive at their weight.
