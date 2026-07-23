@@ -8,7 +8,17 @@
 // full-vocabulary probability vector for the next token; the engine masks and
 // renormalizes as usual.
 
-export const SERVER_BASE = 'http://127.0.0.1:8123';
+// The backend base URL. `?model=<base-url>` in the page URL overrides the
+// local dev server — that's how a hosted copy of the harness (e.g. GitHub
+// Pages) points at a tunnel or cloud inference server. Share links like
+//   https://you.github.io/repo/?model=https://your-tunnel.example.com
+// The server must speak HTTPS when the page does (mixed content is blocked)
+// and send CORS headers (tools/model_server.py already does).
+function resolveBase() {
+  const q = new URLSearchParams(window.location.search).get('model');
+  return q ? q.replace(/\/+$/, '') : 'http://127.0.0.1:8123';
+}
+export const SERVER_BASE = resolveBase();
 
 export function createRemoteModel(base = SERVER_BASE, info = null) {
   return {
