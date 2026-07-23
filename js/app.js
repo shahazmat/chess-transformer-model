@@ -11,15 +11,28 @@ const $ = (id) => document.getElementById(id);
 
 let game = new Chess();
 let model = createMockModel();
-// Swap in the real checkpoint when tools/model_server.py is running.
-detectRemoteModel().then((remote) => {
-  if (remote) {
-    model = remote;
-    console.log(`GPCT: local model server detected — using "${remote.name}"`);
-  } else {
-    console.log('GPCT: no local model server on 127.0.0.1:8123 — using the mock model');
+// Swap in the real checkpoint once the backend answers. Keep retrying for a
+// while: a Hugging Face Space waking from sleep takes a minute or two, and a
+// single 1.5s probe at page load silently stranded phones on the mock model.
+// The footer badge always says which model is live.
+async function connectModel() {
+  const badge = $('backend-status');
+  for (let attempt = 1; attempt <= 24; attempt++) {
+    const remote = await detectRemoteModel();
+    if (remote) {
+      model = remote;
+      console.log(`GPCT: model server detected — using "${remote.name}"`);
+      if (badge) badge.textContent = `model: ${remote.name}`;
+      return;
+    }
+    console.log(`GPCT: model server unreachable (attempt ${attempt}) — using the mock model`);
+    if (badge) badge.textContent = 'model: mock — connecting to server…';
+    await new Promise((r) => setTimeout(r, 5000));
   }
-});
+  const badge2 = $('backend-status');
+  if (badge2) badge2.textContent = 'model: mock — server unreachable';
+}
+connectModel();
 let phase = 'setup'; // 'setup' | 'playing' | 'over'
 let humanColor = 'w';
 let opponent = { rating: null, site: null };

@@ -8,15 +8,20 @@
 // full-vocabulary probability vector for the next token; the engine masks and
 // renormalizes as usual.
 
-// The backend base URL. `?model=<base-url>` in the page URL overrides the
-// local dev server — that's how a hosted copy of the harness (e.g. GitHub
-// Pages) points at a tunnel or cloud inference server. Share links like
-//   https://you.github.io/repo/?model=https://your-tunnel.example.com
+// The backend base URL, in priority order:
+//   1. `?model=<base-url>` in the page URL (explicit override)
+//   2. the local dev server when the page itself is served from localhost
+//   3. the Hugging Face Space (the hosted default — a phone opening the
+//      GitHub Pages copy needs no query parameter)
 // The server must speak HTTPS when the page does (mixed content is blocked)
 // and send CORS headers (tools/model_server.py already does).
+const LOCAL_BASE = 'http://127.0.0.1:8123';
+const HOSTED_BASE = 'https://shazmate-gpct-server.hf.space';
 function resolveBase() {
   const q = new URLSearchParams(window.location.search).get('model');
-  return q ? q.replace(/\/+$/, '') : 'http://127.0.0.1:8123';
+  if (q) return q.replace(/\/+$/, '');
+  const h = window.location.hostname;
+  return h === 'localhost' || h === '127.0.0.1' ? LOCAL_BASE : HOSTED_BASE;
 }
 export const SERVER_BASE = resolveBase();
 
@@ -47,7 +52,9 @@ export function createRemoteModel(base = SERVER_BASE, info = null) {
 // Probe the server; resolves to a ready model or null if it isn't running.
 export async function detectRemoteModel(base = SERVER_BASE) {
   try {
-    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) });
+    // Generous timeout: a phone on mobile data, or a Space that is waking
+    // from sleep, can take far longer than a LAN health check.
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return null;
     return createRemoteModel(base, await res.json());
   } catch {

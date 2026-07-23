@@ -156,7 +156,8 @@
   </main>
 
   <footer>
-    <p>plays your local checkpoint when <code>tools/model_server.py</code> is running, a mock model otherwise — see the README for the contract</p>
+    <p id="backend-status">model: mock — connecting to server…</p>
+    <p>plays the configured backend (<code>?model=</code>, local <code>tools/model_server.py</code>, or the hosted Space) — a mock model until one answers</p>
   </footer>
 
   <script type="module" src="js/app.js"></script>
