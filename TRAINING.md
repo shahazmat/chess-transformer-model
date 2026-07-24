@@ -234,8 +234,23 @@ poison the clean branch), and `<bos>`/`<elo-*>` framing targets are masked to
 `test_nerf_batch.py` pins the exact hand-worked rows, the isolation guard,
 and the index round-trip.
 
-Consequences to plan around: only a fraction of each batch is graded, so
-budget more iterations than a vanilla run (smoke: `-e MAX_ITERS=6000`);
+**Winner-only grading** (default on; `-e WINNER_ONLY=0` disables): move
+targets played by the game's **loser** are additionally masked to `-1`.
+Rationale: the nerf labels are Lichess win-probability deltas, so in an
+already-lost position almost nothing gets flagged — grading both sides
+teaches the model that hopeless flailing is clean play, which showed up as
+severe mid/endgame deterioration in the first full run. The loser is read
+from the game's own tokens (`loser_colour`): the colour-differentiated end
+token names the loser; a bare-`<eos>` game containing `#` ended in mate, so
+the side that didn't play the last move lost; `<draw>` and every other bare
+`<eos>` (timeout draws, abandoned, pre-v3 shards) grade both sides. Loser
+moves stay in the **context** (the model must condition on opponent play,
+never imitate it), and the end group stays graded in every row.
+
+Consequences to plan around: only a fraction of each batch is graded —
+winner-only masking roughly halves the graded move targets of decisive games
+on top of the segment rule — so budget more iterations than a vanilla run
+(smoke: `-e MAX_ITERS=6000`);
 **losses are not comparable** across batching schemes (different task,
 different averaging set); and the first eval is slow while `torch.compile`
 builds the handful of `(rows, cap)` shape variants.

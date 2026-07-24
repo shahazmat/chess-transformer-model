@@ -33,6 +33,11 @@ Configure via environment variables (set with `-e` / `-s` on `hf jobs uv run`):
   PUSH_EVERY_MIN  minutes between periodic safety pushes of ckpt.pt while
               training (default 20; 0 disables) — a killed/timed-out job then
               costs at most that much progress instead of everything
+  WINNER_ONLY 0 to disable winner-only grading (default 1: move targets of
+              the game's losing side are loss-masked — Lichess nerf tokens
+              are win-prob based, so loser flailing is never flagged and
+              would otherwise be learned as clean play; losers' moves stay
+              in context, and draws/unknown results grade both sides)
 
 NOTE: the bare-history transform grades only a fraction of each batch's
 positions (the rest are context or padding), so budget more iterations than a
@@ -123,7 +128,19 @@ Within its game the nerf rule works as before:
      <white/black-flag>, <draw>, when present) and <eos> — is graded in
      EVERY row, whichever segment was chosen: how games end is exactly what
      the end tokens exist to learn, the prediction is never
-     quality-conditioned, and its bare context matches inference.
+     quality-conditioned, and its bare context matches inference;
+  6. WINNER-ONLY grading (default ON; env WINNER_ONLY=0 disables): move
+     targets played by the game's LOSER are additionally masked to -1.
+     Lichess nerf annotations are win-probability based, so in an already
+     lost position almost no move gets flagged — grading both sides would
+     teach the model that hopeless flailing is clean play. The loser is
+     read from the game's own tokens (loser_colour): the colour-
+     differentiated end token names the loser; a bare-<eos> game containing
+     '#' ended in mate, so the side that did NOT play the last move lost;
+     <draw> and any other bare <eos> (timeout draws, abandoned, pre-v3
+     shards) grade both sides. Loser moves always stay in the CONTEXT —
+     the model must condition on opponent play, it just never imitates it —
+     and the end group stays graded in every row regardless.
 
 Known approximation (documented in TRAINING.md): choosing one segment
 uniformly per game weights each position by 1/(segments in its game), so
@@ -154,6 +171,10 @@ BUCKET_CAPS = (64, 128, 256, 384, 512, 768, 1024)
 MAX_ROWS_FACTOR = 8   # rows per batch never exceed MAX_ROWS_FACTOR * batch_size
 SCAN_CHUNK = 1 << 24  # tokens per chunk of the fallback <bos> scan (~32 MB uint16)
 
+# Winner-only grading (docstring item 6). Read once at import; WINNER_ONLY=0
+# restores both-sides grading for comparison runs.
+WINNER_ONLY = os.environ.get("WINNER_ONLY", "1") == "1"
+
 
 class Spec:
     """Vocabulary facts the transform needs, from meta.pkl mappings."""
@@ -180,6 +201,12 @@ class Spec:
         end_names = ("<white-resign>", "<black-resign>", "<white-flag>", "<black-flag>", "<draw>")
         end_ids = [self.eos_id] + [stoi[t] for t in end_names if t in stoi]
         self._end_arr = np.asarray(sorted(end_ids), dtype=np.int64)
+        # winner-only grading: the colour-differentiated end tokens name the
+        # LOSER; '#' marks mate. .get keeps pre-v3 meta.pkl loadable (those
+        # games have no end token and simply grade both sides).
+        self._white_loses = {stoi[t] for t in ("<white-resign>", "<white-flag>") if t in stoi}
+        self._black_loses = {stoi[t] for t in ("<black-resign>", "<black-flag>") if t in stoi}
+        self.mate_id = stoi.get("#")
 
 
 _SPEC_CACHE: dict[str, Spec] = {}
@@ -253,7 +280,41 @@ def choose(spans: list[list[tuple]], rng) -> list[tuple]:
     return [span[int(rng.integers(len(span)))] for span in spans]
 
 
-def materialize(g: np.ndarray, spec: Spec, chosen: list[tuple]):
+def loser_colour(g: np.ndarray, spec: Spec):
+    """The losing colour of one whole game: 0 white, 1 black, None unknown.
+
+    Read purely from the game's own tokens: the colour-differentiated end
+    token (second-to-last, before <eos>) names the loser; a bare-<eos> game
+    containing the mate glyph '#' ended in checkmate, so the loser is the
+    side that did NOT play the last move (move colour IS parity of the core
+    tokens — every game starts at move 1). <draw>, timeout draws, abandoned
+    games, and pre-v3 framings all return None (grade both sides).
+    """
+    end = int(g[-2]) if len(g) >= 2 else -1
+    if end in spec._white_loses:
+        return 0
+    if end in spec._black_loses:
+        return 1
+    if spec.mate_id is not None and bool(np.any(g == spec.mate_id)):
+        n_moves = int(np.count_nonzero(g < spec.core_count))
+        return n_moves % 2  # last mover (parity n_moves-1) mated; other side lost
+    return None
+
+
+def winner_mask(g: np.ndarray, spec: Spec) -> np.ndarray:
+    """Per-position grading permission under winner-only training: False on
+    every token of a move played by the loser, True everywhere else. Frame
+    and end-group positions get parity-arbitrary values here — their grading
+    is decided by _unpred_arr/_end_arr in materialize, never by this mask."""
+    loser = loser_colour(g, spec)
+    if loser is None:
+        return np.ones(len(g), dtype=bool)
+    is_core = g < spec.core_count
+    move_idx = np.cumsum(is_core) - is_core  # cores strictly before p = move number
+    return (move_idx % 2) != loser           # a move's nerf/modifiers/core share its parity
+
+
+def materialize(g: np.ndarray, spec: Spec, chosen: list[tuple], winner_t: np.ndarray | None = None):
     """Build one variable-length (x, y) training row from one whole game.
 
     Keeps only the chosen segment's nerf, deletes every other nerf (the
@@ -262,7 +323,9 @@ def materialize(g: np.ndarray, spec: Spec, chosen: list[tuple]):
     every row): y[p] = -1 unless the target is in the chosen segment or the
     end group, was originally adjacent to its left neighbour (no deletion
     seam), and is not a framing token (<bos>/<elo-*>) the harness always
-    supplies. x/y have length len(kept)-1.
+    supplies. `winner_t` (winner_mask) further restricts segment targets to
+    the winning side's moves; the end group ignores it. x/y have length
+    len(kept)-1.
     """
     keep = ~np.isin(g, spec._nerf_arr)
     active_t = np.zeros(len(g), dtype=bool)
@@ -270,6 +333,8 @@ def materialize(g: np.ndarray, spec: Spec, chosen: list[tuple]):
         active_t[t0:t1 + 1] = True
         if nerf_pos is not None:
             keep[nerf_pos] = True
+    if winner_t is not None:
+        active_t &= winner_t
     old_of_new = np.flatnonzero(keep)
     new = g[old_of_new]
     tgt_old = old_of_new[1:]
@@ -282,7 +347,7 @@ def materialize(g: np.ndarray, spec: Spec, chosen: list[tuple]):
     return x, y
 
 
-def build_row(g: np.ndarray, spec: Spec, rng):
+def build_row(g: np.ndarray, spec: Spec, rng, winner_only: bool | None = None):
     """One whole game -> (x, y). Hard isolation guard first: a row must be
     exactly one game, or games could silently attend across a bad index."""
     if (len(g) < 2 or g[0] != spec.bos_id or g[-1] != spec.eos_id
@@ -291,7 +356,10 @@ def build_row(g: np.ndarray, spec: Spec, rng):
             "game slice is not exactly one whole game (<bos> ... <eos>) — "
             "stale or corrupt .idx.npy game index?"
         )
-    return materialize(g, spec, choose(plan(g, spec), rng))
+    if winner_only is None:
+        winner_only = WINNER_ONLY
+    winner_t = winner_mask(g, spec) if winner_only else None
+    return materialize(g, spec, choose(plan(g, spec), rng), winner_t)
 
 
 # ------------------------------------------------------------- game index

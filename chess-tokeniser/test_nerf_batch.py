@@ -21,6 +21,10 @@ The load-bearing claims these guard:
     offsets, and the rebuilt index is re-cached to disk;
   * bucket caps, per-cap row counts, and token-mass bucket sampling follow
     the documented formulas, so torch.compile sees a fixed shape family;
+  * WINNER-ONLY grading (on by default): move targets of the losing side —
+    loser named by the end token, or by mate parity on bare-<eos> games —
+    are loss-masked while staying in context; draws and unknown results
+    grade both sides, and the end group is graded regardless;
   * the copy of nerf_batch.py embedded in train_chess_hf.py (which runs as
     a single file on HF Jobs) is byte-identical to the module tested here.
 """
@@ -47,6 +51,7 @@ EW, EB = I("<elo-1800>"), I("<elo-1600>")
 M, BL = I("<mistake>"), I("<blunder>")
 E4, C5, NF3, NG3, X = I("e4", "c5", "Nf3", "Ng3", "x")
 WRSN, DRW = I("<white-resign>"), I("<draw>")
+BRSN, WFLG, HASH = I("<black-resign>", "<white-flag>", "#")
 
 # The worked example: 1. e4 c5? 2. Nf3 Ng3?? — fully annotated as packed.
 GAME = [BOS, EW, EB, E4, M, C5, NF3, BL, NG3, EOS]
@@ -332,6 +337,63 @@ def test_sample_batch_np_end_to_end():
     b = nb.sample_batch_np(flat, block_size, batch_size, SPEC, np.random.default_rng(7))
     np.testing.assert_array_equal(a[0], b[0])
     np.testing.assert_array_equal(a[1], b[1])
+
+
+def test_loser_colour():
+    """End tokens name the loser; bare-<eos> mate games lose by parity of the
+    last move; draws and unknown results have no loser (grade both)."""
+    def mk(*body):
+        return np.asarray([BOS, EW, EB, *body, EOS], dtype=np.int64)
+    assert nb.loser_colour(mk(E4, C5, WRSN), SPEC) == 0
+    assert nb.loser_colour(mk(E4, C5, WFLG), SPEC) == 0
+    assert nb.loser_colour(mk(E4, C5, BRSN), SPEC) == 1
+    assert nb.loser_colour(mk(E4, C5, DRW), SPEC) is None
+    assert nb.loser_colour(mk(E4, C5), SPEC) is None            # unknown result
+    assert nb.loser_colour(mk(E4, C5, HASH, NF3), SPEC) == 1    # white mates on ply 3
+    assert nb.loser_colour(mk(E4, HASH, C5), SPEC) == 0         # black mates on ply 2
+
+
+def test_winner_mask_covers_whole_loser_moves():
+    """Every token of a loser's move — nerf, modifiers, and core — is masked;
+    winner moves stay gradable; drawn/unknown games mask nothing."""
+    g = np.asarray([BOS, EW, EB, M, X, E4, C5, WRSN, EOS], dtype=np.int64)
+    wm = nb.winner_mask(g, SPEC)
+    assert wm[3:6].tolist() == [False, False, False]  # white's [?][x]e4, all masked
+    assert wm[6]                                      # black's c5, gradable
+    g = np.asarray([BOS, EW, EB, E4, C5, BRSN, EOS], dtype=np.int64)
+    wm = nb.winner_mask(g, SPEC)
+    assert wm[3] and not wm[4]
+    assert nb.winner_mask(np.asarray([BOS, EW, EB, E4, C5, DRW, EOS], dtype=np.int64), SPEC).all()
+
+
+def test_winner_only_rows():
+    """White resigned: white's moves are never graded, black's annotated move
+    is, the end group is graded regardless, and loser moves stay in x."""
+    g = np.asarray([BOS, EW, EB, E4, M, C5, NF3, WRSN, EOS], dtype=np.int64)
+    (segs,) = nb.plan(g, SPEC)
+    assert segs == [(0, 5, 4), (6, 8, None)]
+    wm = nb.winner_mask(g, SPEC)
+
+    # annotated segment active: ->e4 (white: masked), ->[?] ->c5 (black: graded)
+    x, y = nb.materialize(g, SPEC, [segs[0]], wm)
+    assert x.tolist() == [BOS, EW, EB, E4, M, C5, NF3, WRSN]
+    assert y.tolist() == [-1, -1, -1, M, C5, -1, WRSN, EOS]
+
+    # tail active: Nf3 (white) masked too; only the end group survives
+    x, y = nb.materialize(g, SPEC, [segs[1]], wm)
+    assert x.tolist() == [BOS, EW, EB, E4, C5, NF3, WRSN]
+    assert y.tolist() == [-1, -1, -1, -1, -1, WRSN, EOS]
+
+
+def test_build_row_winner_only_default():
+    """build_row applies the winner mask by default (WINNER_ONLY defaults on);
+    winner_only=False restores both-sides grading."""
+    rng = np.random.default_rng(0)
+    g = np.asarray([BOS, EW, EB, E4, C5, BRSN, EOS], dtype=np.int64)  # black lost
+    _, y = nb.build_row(g, SPEC, rng)
+    assert y.tolist() == [-1, -1, E4, -1, BRSN, EOS]   # black's c5 masked
+    _, y = nb.build_row(g, SPEC, rng, winner_only=False)
+    assert y.tolist() == [-1, -1, E4, C5, BRSN, EOS]
 
 
 def test_embedded_copy_in_sync():
